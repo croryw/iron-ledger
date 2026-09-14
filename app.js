@@ -497,6 +497,21 @@
       var el = $("joinname");
       var name = (el && el.value || "").trim();
       if (!name) { toast("Type your name first"); if (el) el.focus(); return; }
+
+      // Same name as someone already here? That's them on another
+      // device, not a second person. Pick them instead of duplicating.
+      var already = App.data.members.filter(function (m) {
+        return String(m.name).trim().toLowerCase() === name.toLowerCase();
+      })[0];
+      if (already) {
+        App.meId = already.id;
+        lsSet(NS + "me." + App.roomId, already.id);
+        lsSet(NS + "lastRoom", App.roomId);
+        toast("Welcome back, " + already.name);
+        render();
+        return;
+      }
+
       var color = App.data.members.length % PC.length;
       store.addMember(App.roomId, { name: name.slice(0, 24), color: color, goal: 4 }).then(function (m) {
         App.meId = m.id;
@@ -701,11 +716,17 @@
             + '<span class="dot" style="background:' + PC[m.color % PC.length] + '"></span>'
             + esc(m.name) + "</button>";
         });
-        h += "</div>";
+        h += "</div>"
+          + '<div class="note">Tap your own name. Do that once on each phone or '
+          + "computer you use \u2014 your history follows you.</div>";
       }
-      h += '<div class="field"><input id="joinname" type="text" maxlength="24" placeholder="or add your name" autocomplete="given-name" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">'
-        + '<button class="btn" data-act="join">Join</button></div>'
-        + '<div class="note">Remembered on this device only. No password to forget.</div>'
+      var first = !App.data.members.length;
+      h += '<div class="field"><input id="joinname" type="text" maxlength="24" placeholder="'
+        + (first ? "Your name" : "add someone new") + '" autocomplete="given-name" '
+        + 'autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">'
+        + '<button class="btn' + (first ? "" : " ghost") + '" data-act="join">'
+        + (first ? "Join" : "Add") + "</button></div>"
+        + (first ? '<div class="note">No account, no password.</div>' : "")
         + "</section>";
       return h;
     }
