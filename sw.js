@@ -1,6 +1,6 @@
 /* Iron Ledger service worker — offline shell.
    Bump CACHE when you change any of the files below. */
-const CACHE = 'iron-ledger-v7';
+const CACHE = 'iron-ledger-v8';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './config.js',
   './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',

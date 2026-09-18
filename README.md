@@ -114,6 +114,23 @@ once. Each board keeps its own weekly goal and its own conversation.
 
 ---
 
+## Your private log
+
+Tap **Open your log** on the boards screen (or **Your private log** at the foot of
+a board) for a page that is yours alone:
+
+- **Meals today** — tap **+ Meal** each time you eat. A daily target you're trying
+  to reach, adjustable from 1 to 10.
+- **Weight** — optional. Log it as often or as rarely as you like, in kg or lb.
+- Charts for the last three weeks, with a **Show the numbers** table view.
+
+Neither meals nor weight appears on any board, ever. That isn't a UI choice — the
+row-level security policies in `supabase-migration-v3.sql` allow only
+`auth.uid() = user_id` to read those two tables, so no other account can fetch
+them even by calling the database directly.
+
+---
+
 ## Changing things later
 
 Edit the file in GitHub's web interface (click the file → the pencil icon →
@@ -124,7 +141,7 @@ changing `app.js`, `styles.css` or `index.html` you must also bump the version
 in `sw.js`:
 
 ```js
-const CACHE = 'iron-ledger-v7';   // was v6
+const CACHE = 'iron-ledger-v9';   // was v8
 ```
 
 Otherwise phones keep serving the old copy.
@@ -208,3 +225,4 @@ resume it. Daily use keeps it awake.
 | `manifest.webmanifest` | Makes it installable. Name, icon, colours. |
 | `icons/` | App icons for the home screen. |
 | `supabase-setup.sql` | Database tables and security rules. Run once. |
+| `supabase-migration-v3.sql` | Adds the private meal and weight tables. Run once, additive. |

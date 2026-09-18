@@ -132,6 +132,7 @@
     authBusy: false,
     authMsg: null,
     openComment: null,   // checkin id whose comment box is open
+    showTable: false,    // the numbers-instead-of-charts view
     justChecked: false,
     unsub: null
   };
@@ -139,7 +140,9 @@
 
   function parseRoute() {
     var m = /#\/b\/([0-9a-fA-F-]{8,})/.exec(location.hash || "");
-    return m ? { name: "board", boardId: m[1] } : { name: "boards", boardId: null };
+    if (m) return { name: "board", boardId: m[1] };
+    if (/#\/me/.test(location.hash || "")) return { name: "me", boardId: null };
+    return { name: "boards", boardId: null };
   }
   function go(hash) {
     if ((location.hash || "") === hash) return;
@@ -174,6 +177,19 @@
       ]).then(function (r) {
         App.d = { rosters: r[0] || [], myCheckins: r[1] || [] };
       });
+    });
+  }
+
+  /* The private log. These two tables are readable only by their
+     owner, so there is no board in this query at all. */
+  function loadMeScreen() {
+    var since = daysAgoKey(HISTORY_DAYS);
+    return Promise.all([
+      loadMyBoards(),
+      sb.from("meals").select("*").eq("user_id", uid()).gte("day", since).order("day").then(unwrap),
+      sb.from("weights").select("*").eq("user_id", uid()).gte("day", since).order("day").then(unwrap)
+    ]).then(function (r) {
+      App.d = { meals: r[1] || [], weights: r[2] || [] };
     });
   }
 
@@ -218,7 +234,9 @@
             App.error = "That board doesn't exist. The link may be wrong, or it was deleted.";
           } else { App.d = d; App.error = null; }
         })
-      : loadBoardsScreen().then(function () { App.error = null; });
+      : r.name === "me"
+        ? loadMeScreen().then(function () { App.error = null; })
+        : loadBoardsScreen().then(function () { App.error = null; });
 
     return job.then(function () {
       App.loading = false;
@@ -246,7 +264,7 @@
           : { event: "*", schema: "public", table: t },
         scheduleReload);
     });
-    ["checkins", "rest_weeks"].forEach(function (t) {
+    ["checkins", "rest_weeks", "meals", "weights"].forEach(function (t) {
       ch.on("postgres_changes", { event: "*", schema: "public", table: t }, scheduleReload);
     });
     ch.subscribe();
@@ -547,6 +565,46 @@
         .then(function () { if (App.profile) App.profile.name = v.slice(0, 24); }));
     },
 
+    /* ---- the private log ---- */
+    me: function () { go("#/me"); },
+    meal: function (el) {
+      var d = +el.getAttribute("data-d");
+      var row = todaysMeals();
+      var next = Math.max(0, (row ? row.count : 0) + d);
+      if (d > 0) { burst(el, 7); buzz(12); }
+      act(row
+        ? sb.from("meals").update({ count: next, updated_at: new Date().toISOString() }).eq("id", row.id)
+        : sb.from("meals").insert({ user_id: uid(), day: today(), count: next }));
+    },
+    mealgoal: function (el) {
+      var d = +el.getAttribute("data-d");
+      var g = Math.min(10, Math.max(1, mealGoal() + d));
+      act(sb.from("profiles").update({ meal_goal: g }).eq("id", uid())
+        .then(function () { if (App.profile) App.profile.meal_goal = g; }));
+    },
+    unit: function () {
+      var u = weightUnit() === "kg" ? "lb" : "kg";
+      act(sb.from("profiles").update({ weight_unit: u }).eq("id", uid())
+        .then(function () { if (App.profile) App.profile.weight_unit = u; }));
+    },
+    weigh: function () {
+      var el = $("weightin");
+      var v = parseFloat((el && el.value || "").replace(",", "."));
+      if (!v || v <= 0) { toast("Enter a number first"); if (el) el.focus(); return; }
+      var kg = weightUnit() === "lb" ? v / 2.2046226 : v;
+      if (kg < 20 || kg > 400) { toast("That doesn't look right — check the units"); return; }
+      kg = Math.round(kg * 100) / 100;
+      var row = todaysWeight();
+      if (el) el.value = "";
+      act(row
+        ? sb.from("weights").update({ kg: kg }).eq("id", row.id)
+        : sb.from("weights").insert({ user_id: uid(), day: today(), kg: kg }));
+    },
+    unweigh: function (el) {
+      act(sb.from("weights").delete().eq("id", el.getAttribute("data-id")));
+    },
+    table: function () { App.showTable = !App.showTable; render(); },
+
     /* ---- sharing ---- */
     share: function () {
       var url = boardUrl();
@@ -616,6 +674,9 @@
     }
   }
 
+  function whoTag() {
+    return App.profile ? '<span class="who-name">' + esc(App.profile.name) + "</span>" : "";
+  }
   function masthead(right) {
     return '<header class="mast"><div class="mark"><span class="comet" aria-hidden="true"></span>'
       + "<h1>Iron Ledger</h1></div>"
@@ -634,7 +695,9 @@
       return masthead("") + '<div class="banner warn">' + esc(App.error) + "</div>"
         + '<div class="field"><button class="btn ghost" data-act="boards">Back to your boards</button></div>';
     }
-    return App.route.name === "board" ? boardView() : boardsView();
+    if (App.route.name === "board") return boardView();
+    if (App.route.name === "me") return meView();
+    return boardsView();
   }
 
   /* ---------- signed out ---------- */
@@ -668,7 +731,7 @@
   /* ---------- your boards ---------- */
 
   function boardsView() {
-    var h = masthead(esc(App.profile ? App.profile.name : ""));
+    var h = masthead(whoTag());
     var rosters = (App.d && App.d.rosters) || [];
     var mine = (App.d && App.d.myCheckins) || [];
     var wk = weekKeys(weekStart(new Date()));
@@ -712,6 +775,14 @@
       + '<button class="btn" data-act="newboard">Create</button></div>'
       + '<div class="note">Different friends, different boards. Your attendance is shared '
       + "across all of them; goals and chat are per board.</div></section>";
+
+    h += '<section class="panel quiet">'
+      + '<div class="eyebrow">Just for you</div>'
+      + '<h2 class="headline">Meals and weight</h2>'
+      + '<p class="sub">A private log — meals you\'ve eaten today, and your weight if you '
+      + "want to track it. Nobody on any board can see either one.</p>"
+      + '<div class="field"><button class="btn ghost" data-act="me">Open your log</button></div>'
+      + "</section>";
 
     h += '<div class="footer"><span>Signed in as ' + esc(App.profile ? App.profile.name : "") + "</span>"
       + '<button class="linkish" data-act="signout">Sign out</button></div>';
@@ -879,6 +950,7 @@
     h += '<section class="sect"><div class="sect-head"><h2>The thread</h2></div>' + thread(waiting) + "</section>";
 
     h += '<div class="footer">'
+      + '<button class="linkish" data-act="me">Your private log</button>'
       + '<button class="linkish" data-act="copy">Copy board link</button>'
       + '<button class="linkish" data-act="rename">Change your name</button>'
       + '<button class="linkish" data-act="leaveboard">Leave board</button>'
@@ -979,6 +1051,323 @@
         + '<div class="line"><b>' + esc(nameOf(e.user_id)) + "</b> joined the board</div>"
         + '<div class="meta">' + ago(e.created_at) + "</div></div></div>";
     }).join("") + "</div>";
+  }
+
+  /* ============================================================
+     The private log — meals and weight
+
+     Nothing here is shared. The database policies allow only the
+     owner to read these rows, so this page can't leak to a board
+     even by mistake.
+     ============================================================ */
+
+  function mealGoal() {
+    return Math.min(10, Math.max(1, (App.profile && App.profile.meal_goal) || 4));
+  }
+  function weightUnit() {
+    return (App.profile && App.profile.weight_unit) === "lb" ? "lb" : "kg";
+  }
+  function toUnit(kg) { return weightUnit() === "lb" ? kg * 2.2046226 : kg; }
+  function fmtW(kg, dp) { return toUnit(kg).toFixed(dp == null ? 1 : dp); }
+  function mealRows() { return (App.d && App.d.meals) || []; }
+  function weightRows() { return (App.d && App.d.weights) || []; }
+  function todaysMeals() {
+    return mealRows().filter(function (m) { return String(m.day).slice(0, 10) === today(); })[0];
+  }
+  function todaysWeight() {
+    return weightRows().filter(function (w) { return String(w.day).slice(0, 10) === today(); })[0];
+  }
+  function lastDays(n) {
+    var out = [], i;
+    for (i = n - 1; i >= 0; i--) out.push(daysAgoKey(i));
+    return out;
+  }
+
+  /* ---------- charts ----------
+     One series each, so no legend: the heading names it. Thin
+     marks, solid hairline grid, a label only on the endpoint, and
+     a hover layer. Every chart has a table twin behind "Show the
+     numbers". */
+
+  function lineChart(pts, unit) {
+    var W = 320, H = 152, L = 40, R = 14, T = 14, B = 26;
+    var pw = W - L - R, ph = H - T - B;
+    var ys = pts.map(function (p) { return p.y; });
+    var min = Math.min.apply(null, ys), max = Math.max.apply(null, ys);
+    var pad = Math.max(0.3, (max - min) * 0.2);
+    var lo = min - pad, hi = max + pad;
+    if (hi - lo < 0.6) { var mid = (hi + lo) / 2; lo = mid - 0.3; hi = mid + 0.3; }
+    var X = function (i) { return L + (pts.length === 1 ? pw / 2 : pw * i / (pts.length - 1)); };
+    var Y = function (v) { return T + ph - ph * (v - lo) / (hi - lo); };
+
+    var g = "";
+    [0, 0.5, 1].forEach(function (f) {
+      var v = lo + (hi - lo) * f, y = Y(v);
+      g += '<line x1="' + L + '" y1="' + y.toFixed(1) + '" x2="' + (W - R)
+        + '" y2="' + y.toFixed(1) + '" class="grid"/>'
+        + '<text x="' + (L - 7) + '" y="' + (y + 3.5).toFixed(1) + '" class="ax ax-y">'
+        + v.toFixed(1) + "</text>";
+    });
+
+    var d = pts.map(function (p, i) {
+      return (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(p.y).toFixed(1);
+    }).join(" ");
+
+    var lastI = pts.length - 1;
+    var lx = X(lastI), ly = Y(pts[lastI].y);
+    var labelAnchor = "end", labelX = lx - 7;
+    if (lastI === 0) { labelAnchor = "middle"; labelX = lx; }
+
+    var hits = pts.map(function (p, i) {
+      var band = pts.length > 1 ? pw / (pts.length - 1) : pw;
+      var x = Math.max(L, X(i) - band / 2);
+      var w = Math.min(band, W - R - x);
+      return '<rect class="hit" x="' + x.toFixed(1) + '" y="' + T + '" width="' + w.toFixed(1)
+        + '" height="' + ph + '" tabindex="0" data-fx="' + X(i).toFixed(1)
+        + '" data-fy="' + Y(p.y).toFixed(1) + '" data-tip="'
+        + esc(fromKey(p.x).toLocaleDateString(undefined, { day: "numeric", month: "short" })
+              + " · " + p.y.toFixed(1) + " " + unit) + '"/>';
+    }).join("");
+
+    return '<svg class="chart" viewBox="0 0 ' + W + " " + H + '" role="img" '
+      + 'aria-label="Your weight over time">'
+      + g
+      + '<text x="' + L + '" y="' + (H - 7) + '" class="ax">'
+      + esc(fromKey(pts[0].x).toLocaleDateString(undefined, { day: "numeric", month: "short" })) + "</text>"
+      + '<text x="' + (W - R) + '" y="' + (H - 7) + '" class="ax" text-anchor="end">'
+      + esc(fromKey(pts[lastI].x).toLocaleDateString(undefined, { day: "numeric", month: "short" })) + "</text>"
+      + '<line class="cross" x1="0" y1="' + T + '" x2="0" y2="' + (T + ph) + '" style="display:none"/>'
+      + '<path d="' + d + '" class="series"/>'
+      + '<circle cx="' + lx.toFixed(1) + '" cy="' + ly.toFixed(1) + '" r="4" class="end"/>'
+      + '<text x="' + labelX.toFixed(1) + '" y="' + (ly - 10).toFixed(1)
+      + '" class="endlabel" text-anchor="' + labelAnchor + '">'
+      + pts[lastI].y.toFixed(1) + " " + unit + "</text>"
+      + '<circle class="focus" r="4" style="display:none"/>'
+      + hits
+      + "</svg>";
+  }
+
+  function barChart(days, goal) {
+    var W = 320, H = 138, L = 22, R = 10, T = 14, B = 24;
+    var pw = W - L - R, ph = H - T - B;
+    var vals = days.map(function (d) { return d.y; });
+    var hi = Math.max(goal + 1, Math.max.apply(null, vals) + 1, 3);
+    var band = pw / days.length;
+    var bw = Math.max(4, band - 3);            // the 3px leaves the surface gap
+    var Y = function (v) { return T + ph - ph * (v / hi); };
+    var base = T + ph;
+
+    var g = "";
+    [0, Math.round(hi / 2), hi].forEach(function (v) {
+      var y = Y(v);
+      g += '<line x1="' + L + '" y1="' + y.toFixed(1) + '" x2="' + (W - R) + '" y2="'
+        + y.toFixed(1) + '" class="grid"/>'
+        + '<text x="' + (L - 6) + '" y="' + (y + 3.5).toFixed(1) + '" class="ax ax-y">' + v + "</text>";
+    });
+
+    var bars = days.map(function (d, i) {
+      var x = L + band * i + (band - bw) / 2;
+      if (!d.y) return "";
+      var y = Y(d.y), h = base - y, r = Math.min(4, bw / 2, h);
+      return '<path class="bar" d="M' + x.toFixed(1) + " " + base
+        + "L" + x.toFixed(1) + " " + (y + r).toFixed(1)
+        + "Q" + x.toFixed(1) + " " + y.toFixed(1) + " " + (x + r).toFixed(1) + " " + y.toFixed(1)
+        + "L" + (x + bw - r).toFixed(1) + " " + y.toFixed(1)
+        + "Q" + (x + bw).toFixed(1) + " " + y.toFixed(1) + " " + (x + bw).toFixed(1) + " " + (y + r).toFixed(1)
+        + "L" + (x + bw).toFixed(1) + " " + base + 'Z"/>';
+    }).join("");
+
+    var gy = Y(goal);
+    var target = '<line x1="' + L + '" y1="' + gy.toFixed(1) + '" x2="' + (W - R) + '" y2="'
+      + gy.toFixed(1) + '" class="target"/>'
+      + '<text x="' + (W - R) + '" y="' + (gy - 5).toFixed(1)
+      + '" class="ax" text-anchor="end">target ' + goal + "</text>";
+
+    var labels = days.map(function (d, i) {
+      if (i % 7 !== 0 && i !== days.length - 1) return "";
+      var x = L + band * i + band / 2;
+      return '<text x="' + x.toFixed(1) + '" y="' + (H - 6) + '" class="ax" text-anchor="middle">'
+        + fromKey(d.x).getDate() + "</text>";
+    }).join("");
+
+    var hits = days.map(function (d, i) {
+      return '<rect class="hit" x="' + (L + band * i).toFixed(1) + '" y="' + T + '" width="'
+        + band.toFixed(1) + '" height="' + ph + '" tabindex="0" data-tip="'
+        + esc(fromKey(d.x).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" })
+              + " · " + d.y + " meal" + (d.y === 1 ? "" : "s")) + '"/>';
+    }).join("");
+
+    return '<svg class="chart bars" viewBox="0 0 ' + W + " " + H + '" role="img" '
+      + 'aria-label="Meals logged per day over the last three weeks">'
+      + g + bars + target + labels + hits + "</svg>";
+  }
+
+  /* one shared hover layer for every chart */
+  function chartTip() {
+    var t = $("charttip");
+    if (!t) {
+      t = document.createElement("div");
+      t.id = "charttip";
+      document.body.appendChild(t);
+    }
+    return t;
+  }
+  function showTipFor(el, clientX, clientY) {
+    var t = chartTip();
+    t.textContent = el.getAttribute("data-tip");
+    t.classList.add("show");
+    var w = t.offsetWidth || 120;
+    var x = Math.min(Math.max(clientX, w / 2 + 8), window.innerWidth - w / 2 - 8);
+    t.style.left = x + "px";
+    t.style.top = Math.max(34, clientY - 16) + "px";
+    var svg = el.closest("svg");
+    if (!svg) return;
+    var focus = svg.querySelector(".focus"), cross = svg.querySelector(".cross");
+    var fx = el.getAttribute("data-fx"), fy = el.getAttribute("data-fy");
+    if (focus && fx) {
+      focus.setAttribute("cx", fx); focus.setAttribute("cy", fy);
+      focus.style.display = "";
+    }
+    if (cross && fx) {
+      cross.setAttribute("x1", fx); cross.setAttribute("x2", fx);
+      cross.style.display = "";
+    }
+  }
+  function hideTip() {
+    var t = $("charttip");
+    if (t) t.classList.remove("show");
+    Array.prototype.forEach.call(root.querySelectorAll(".focus,.cross"), function (n) {
+      n.style.display = "none";
+    });
+  }
+  root.addEventListener("pointermove", function (ev) {
+    var el = ev.target.closest ? ev.target.closest("[data-tip]") : null;
+    if (!el) { hideTip(); return; }
+    showTipFor(el, ev.clientX, ev.clientY);
+  });
+  root.addEventListener("pointerleave", hideTip, true);
+  root.addEventListener("focusin", function (ev) {
+    var el = ev.target.closest ? ev.target.closest("[data-tip]") : null;
+    if (!el) return;
+    var r = el.getBoundingClientRect();
+    showTipFor(el, r.left + r.width / 2, r.top);
+  });
+  root.addEventListener("focusout", hideTip);
+
+  /* ---------- the page ---------- */
+
+  function meView() {
+    var h = masthead(whoTag());
+    h += '<div class="switcher"><button class="linkish" data-act="boards">← all boards</button>'
+      + '<span class="bnow">Your log</span></div>';
+    h += '<div class="banner private">🔒 Only you can see this page. Meals and weight are '
+      + "never shown on a board.</div>";
+
+    /* ----- meals today ----- */
+    var goal = mealGoal();
+    var row = todaysMeals();
+    var n = row ? row.count : 0;
+    var pips = "";
+    var shown = Math.max(goal, n);
+    for (var i = 0; i < shown; i++) {
+      pips += '<span class="pip' + (i < n ? " on" : "") + (i >= goal ? " extra" : "") + '"></span>';
+    }
+    h += '<section class="panel' + (n >= goal ? " done" : "") + '">'
+      + '<div class="eyebrow">Meals today</div>'
+      + '<div class="pips">' + pips + "</div>"
+      + '<div class="mealrow">'
+      + '<button class="bigbtn slim" data-act="meal" data-d="1">+ Meal</button>'
+      + '<button class="btn ghost" data-act="meal" data-d="-1" aria-label="Remove a meal">−</button>'
+      + "</div>"
+      + '<div class="sub">' + (n === 0 ? "Nothing logged yet today."
+          : n < goal ? n + " of " + goal + " — " + (goal - n) + " to go."
+          : n === goal ? n + " of " + goal + " — target hit. 🎯"
+          : n + " of " + goal + " — over target, good.") + "</div>"
+      + '<div class="cardfoot"><span class="note">Daily target</span>'
+      + '<span class="step"><button data-act="mealgoal" data-d="-1" aria-label="Lower daily meal target">−</button>'
+      + "<span>" + goal + "</span>"
+      + '<button data-act="mealgoal" data-d="1" aria-label="Raise daily meal target">+</button></span>'
+      + "</div></section>";
+
+    /* ----- weight ----- */
+    var ws = weightRows().slice().sort(function (a, b) {
+      return String(a.day).localeCompare(String(b.day));
+    });
+    var unit = weightUnit();
+    var latest = ws.length ? ws[ws.length - 1] : null;
+    h += '<section class="panel">'
+      + '<div class="eyebrow">Weight <span class="opt">optional</span></div>';
+    if (latest) {
+      var cutoff = daysAgoKey(28);
+      var earlier = ws.filter(function (w) { return String(w.day).slice(0, 10) <= cutoff; });
+      var ref = earlier.length ? earlier[earlier.length - 1] : ws[0];
+      var delta = latest.kg - ref.kg;
+      var deltaU = toUnit(latest.kg) - toUnit(ref.kg);
+      h += '<div class="hero">' + fmtW(latest.kg) + '<small>' + unit + "</small></div>"
+        + '<div class="sub">' + (ws.length > 1 && ref !== latest
+            ? (Math.abs(deltaU) < 0.05 ? "level over the last four weeks"
+               : (deltaU > 0 ? "up " : "down ") + Math.abs(deltaU).toFixed(1) + " " + unit
+                 + " over the last four weeks")
+            : "first entry — a line appears once you've logged a few")
+        + " · last logged "
+        + esc(fromKey(String(latest.day).slice(0, 10))
+              .toLocaleDateString(undefined, { day: "numeric", month: "short" })) + "</div>";
+    } else {
+      h += '<div class="sub">Nothing logged yet. Entirely optional — the app works fine '
+        + "without it.</div>";
+    }
+    h += '<div class="sayrow weighrow"><input id="weightin" type="text" inputmode="decimal" '
+      + 'placeholder="Today\'s weight in ' + unit + '" autocomplete="off" enterkeyhint="done">'
+      + '<button class="btn" data-act="weigh">Save</button>'
+      + '<button class="btn ghost tiny" data-act="unit" aria-label="Switch units">'
+      + (unit === "kg" ? "→ lb" : "→ kg") + "</button></div>";
+    h += "</section>";
+
+    /* ----- the pictures ----- */
+    var mealDays = lastDays(21).map(function (k) {
+      var m = mealRows().filter(function (x) { return String(x.day).slice(0, 10) === k; })[0];
+      return { x: k, y: m ? m.count : 0 };
+    });
+    var anyMeals = mealDays.some(function (d) { return d.y > 0; });
+
+    h += '<section class="sect"><div class="sect-head"><h2>The last three weeks</h2>'
+      + '<button class="linkish" data-act="table">' + (App.showTable ? "Show the charts" : "Show the numbers")
+      + "</button></div>";
+
+    if (App.showTable) {
+      h += '<div class="gridwrap"><table class="week numbers"><thead><tr>'
+        + "<th>Day</th><th>Meals</th><th>Weight</th></tr></thead><tbody>";
+      lastDays(21).slice().reverse().forEach(function (k) {
+        var m = mealRows().filter(function (x) { return String(x.day).slice(0, 10) === k; })[0];
+        var w = ws.filter(function (x) { return String(x.day).slice(0, 10) === k; })[0];
+        h += "<tr><th>" + esc(fromKey(k).toLocaleDateString(undefined,
+              { weekday: "short", day: "numeric", month: "short" })) + "</th>"
+          + "<td>" + (m && m.count ? m.count : "—") + "</td>"
+          + "<td>" + (w ? fmtW(w.kg) + " " + unit
+              + ' <button class="linkish tinyx" data-act="unweigh" data-id="' + w.id + '">delete</button>'
+              : "—") + "</td></tr>";
+      });
+      h += "</tbody></table></div>";
+    } else {
+      h += '<div class="chartcard"><div class="chead">Meals per day</div>'
+        + (anyMeals ? barChart(mealDays, goal)
+           : '<div class="empty">Nothing logged yet. Tap <b>+ Meal</b> above and this fills in.</div>')
+        + "</div>";
+      h += '<div class="chartcard"><div class="chead">Weight, ' + unit + "</div>"
+        + (ws.length >= 2
+            ? lineChart(ws.map(function (w) {
+                return { x: String(w.day).slice(0, 10), y: toUnit(w.kg) };
+              }), unit)
+            : '<div class="empty">' + (ws.length === 1
+                ? "One entry so far — log a couple more and the trend line appears."
+                : "No entries yet.") + "</div>")
+        + "</div>";
+    }
+    h += "</section>";
+
+    h += '<div class="footer"><button class="linkish" data-act="boards">← all boards</button>'
+      + '<span>Private to you</span></div>';
+    return h;
   }
 
   /* ============================================================
