@@ -520,3 +520,56 @@ table.week.numbers tbody th{font-weight:700;font-size:13px;padding:5px 14px 5px 
 .when .who-name{text-transform:none;font-style:normal;font-weight:800;color:var(--ink)}
 .weighrow input{flex:1 1 120px}
 .weighrow .btn{flex:0 0 auto}
+
+/* ------------------------------------------------------------
+   v4 — a thread you can skim, a grid you can tap, and tabs
+   ------------------------------------------------------------ */
+
+/* grouped, collapsible thread */
+.tgroup{display:flex;flex-direction:column;gap:7px;margin-bottom:16px}
+.tglabel{font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800;
+  color:var(--muted);padding-left:2px}
+.trow{display:flex;align-items:center;gap:10px;width:100%;text-align:left;cursor:pointer;
+  background:var(--surface);border:2px solid var(--line);border-radius:var(--blob-sm);
+  padding:9px 13px;box-shadow:var(--shadow-sm);font-size:14.5px;
+  transition:transform .09s ease,box-shadow .09s ease,border-color .14s ease}
+.trow:hover{border-color:var(--pc,var(--ink))}
+.trow:active{transform:translateY(2px);box-shadow:0 0 0 var(--line)}
+.trow .tdot{width:11px;height:11px;border-radius:50%;background:var(--pc);flex:none;
+  box-shadow:0 0 0 2px var(--ink)}
+.trow .tname{font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.trow .tday{color:var(--muted);font-size:13px;white-space:nowrap}
+.trow .tmeta{margin-left:auto;display:flex;gap:7px;flex:none}
+.trow .tb{font-size:13px;background:var(--surface2);border-radius:999px;padding:1px 8px;
+  font-weight:700;color:var(--ink2)}
+.trow.sys{background:var(--surface2);border-style:dashed;box-shadow:none;cursor:default;
+  font-size:13.5px;color:var(--ink2)}
+.trow.sys .tname{font-weight:400;white-space:normal}
+.trow.sys .tday{margin-left:auto;font-style:italic}
+.tgroup .item{margin-block:3px}
+
+/* tappable day cells for backfilling */
+button.mk.tap{cursor:pointer;padding:0;transition:transform .09s ease}
+button.mk.tap:hover{border-color:var(--ink)}
+button.mk.tap:active{transform:scale(.88)}
+.gridhint{margin-top:10px;font-style:italic}
+
+/* the tab bar */
+.tabs{position:fixed;left:0;right:0;bottom:0;z-index:60;display:flex;gap:8px;
+  padding:9px max(14px,env(safe-area-inset-left)) calc(9px + env(safe-area-inset-bottom))
+          max(14px,env(safe-area-inset-right));
+  background:color-mix(in srgb,var(--surface) 92%,transparent);
+  border-top:2px solid var(--line);
+  -webkit-backdrop-filter:blur(10px);backdrop-filter:blur(10px)}
+.tabs .tab{flex:1;cursor:pointer;border:2px solid transparent;background:transparent;
+  color:var(--muted);border-radius:var(--blob-sm);padding:9px 6px;font-weight:800;font-size:14px;
+  transition:background .14s ease,color .14s ease,border-color .14s ease}
+.tabs .tab:hover{color:var(--ink)}
+.tabs .tab.on{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+.tabs .tab:active{transform:translateY(1px)}
+
+/* room for the bar */
+.wrap{padding-block-end:calc(96px + env(safe-area-inset-bottom))}
+@media (max-width:520px){
+  .wrap{padding-block-end:calc(92px + env(safe-area-inset-bottom))}
+}

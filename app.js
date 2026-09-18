@@ -133,6 +133,7 @@
     authMsg: null,
     openComment: null,   // checkin id whose comment box is open
     showTable: false,    // the numbers-instead-of-charts view
+    openItem: null,      // a collapsed thread row the reader opened
     justChecked: false,
     unsub: null
   };
@@ -297,7 +298,7 @@
     var days = daysOf(m.user_id);
     var wk = weekKeys(weekStart(new Date()));
     var thisWeek = wk.filter(function (k) { return days[k]; }).length;
-    var goal = Math.max(1, m.goal || 4);
+    var goal = Math.max(1, m.goal || 3);
 
     var weeks = {};
     Object.keys(days).forEach(function (k) {
@@ -318,11 +319,26 @@
       i++;
     }
 
+    // A softer run that still means something on the weeks you fell
+    // short: consecutive weeks with at least one session in them.
+    var showed = 0, c2 = weekStart(new Date()), j = 0, f2 = true;
+    while (j < 200) {
+      var k2 = dkey(c2);
+      if ((weeks[k2] || 0) > 0 || isResting(m.user_id, k2)) showed++;
+      else if (!f2) break;
+      f2 = false;
+      c2 = new Date(c2.getFullYear(), c2.getMonth(), c2.getDate() - 7);
+      j++;
+    }
+    var best = 0;
+    Object.keys(weeks).forEach(function (w) { if (weeks[w] > best) best = weeks[w]; });
+
     var last = null;
     Object.keys(days).forEach(function (k) { if (!last || k > last) last = k; });
 
     return {
       goal: goal, thisWeek: thisWeek, total: Object.keys(days).length, streak: streak,
+      showed: showed, best: best,
       resting: isResting(m.user_id, dkey(weekStart(new Date()))),
       last: last, since: last ? dayDiff(last, today()) : null
     };
@@ -341,7 +357,7 @@
         if (isResting(m.user_id, w)) return true;
         var days = daysOf(m.user_id);
         var n = weekKeys(fromKey(w)).filter(function (k) { return days[k]; }).length;
-        return n >= Math.max(1, m.goal || 4);
+        return n >= Math.max(1, m.goal || 3);
       });
       if (ok) together++;
     });
@@ -444,7 +460,7 @@
         .select().single().then(unwrap)
         .then(function (b) {
           return sb.from("board_members")
-            .insert({ board_id: b.id, user_id: uid(), goal: 4, color: 0 }).then(function (r) {
+            .insert({ board_id: b.id, user_id: uid(), goal: 3, color: 0 }).then(function (r) {
               if (r.error) throw r.error;
               return sb.from("events").insert({ board_id: b.id, user_id: uid(), kind: "join" });
             }).then(function () { return b; });
@@ -457,7 +473,7 @@
     joinboard: function () {
       var bid = App.route.boardId;
       var color = 0;
-      sb.from("board_members").insert({ board_id: bid, user_id: uid(), goal: 4, color: color })
+      sb.from("board_members").insert({ board_id: bid, user_id: uid(), goal: 3, color: color })
         .then(function (r) { if (r.error) throw r.error; })
         .then(function () { return sb.from("events").insert({ board_id: bid, user_id: uid(), kind: "join" }); })
         .then(load)
@@ -490,6 +506,23 @@
     },
     undo: function () {
       act(sb.from("checkins").delete().eq("user_id", uid()).eq("day", today()));
+    },
+    toggleday: function (el) {
+      var day = el.getAttribute("data-day");
+      var have = (App.d.checkins || []).some(function (c) {
+        return c.user_id === uid() && String(c.day).slice(0, 10) === day;
+      });
+      if (!have) { burst(el, 8); buzz(12); }
+      act(have
+        ? sb.from("checkins").delete().eq("user_id", uid()).eq("day", day)
+        : sb.from("checkins").insert({ user_id: uid(), day: day }).then(function (r) {
+            if (r.error && r.error.code !== "23505") throw r.error;
+          }));
+    },
+    expand: function (el) {
+      var id = el.getAttribute("data-id");
+      App.openItem = App.openItem === id ? null : id;
+      render();
     },
     rest: function () {
       var w = dkey(weekStart(new Date()));
@@ -660,7 +693,7 @@
     var keep = a && a.tagName === "INPUT" && a.id
       ? { id: a.id, value: a.value, pos: a.selectionStart } : null;
 
-    root.innerHTML = '<div class="wrap">' + view() + "</div>";
+    root.innerHTML = '<div class="wrap">' + view() + "</div>" + navBar();
     App.justChecked = false;
     App.notice = null;
 
@@ -672,6 +705,28 @@
         el.focus();
       }
     }
+  }
+
+  /* Three destinations deserve three tabs, not links buried under
+     four screens of scrolling. */
+  function navBar() {
+    if (!CONFIGURED || !App.booted || !App.user) return "";
+    var r = App.route.name;
+    var boardId = App.route.boardId
+      || (App.myBoards.length === 1 ? App.myBoards[0].board_id : null);
+    var h = '<nav class="tabs" aria-label="Sections">'
+      + '<button class="tab' + (r === "boards" ? " on" : "") + '" data-act="boards">Boards</button>';
+    if (boardId) {
+      // The middle tab wears the board's own name — "Boards" and
+      // "Board" side by side was a coin toss.
+      var bm = App.myBoards.filter(function (x) { return x.board_id === boardId; })[0];
+      var nm = (bm && bm.boards && bm.boards.name) || (App.d && App.d.board && App.d.board.name) || "Board";
+      if (nm.length > 14) nm = nm.slice(0, 13).replace(/\s+$/, "") + "…";
+      h += '<button class="tab' + (r === "board" ? " on" : "") + '" data-act="openboard" '
+        + 'data-id="' + boardId + '">' + esc(nm) + "</button>";
+    }
+    h += '<button class="tab' + (r === "me" ? " on" : "") + '" data-act="me">My log</button>';
+    return h + "</nav>";
   }
 
   function whoTag() {
@@ -882,9 +937,6 @@
         + '<span class="note">' + (gs.together > 0
             ? "<b>" + gs.together + "</b> week" + (gs.together === 1 ? "" : "s") + " everyone hit it"
             : "no week everyone hit it — yet") + "</span>"
-        + '<span class="note">' + (waiting.length
-            ? "<b>" + waiting.length + "</b> waiting on you"
-            : "all quiet in the valley") + "</span>"
         + "</div></section>";
     }
 
@@ -904,8 +956,10 @@
         + "<span>/" + s.goal + "</span></i></div><div class=\"facts\">"
         + '<div class="fact">' + (s.streak > 0
             ? '<b class="flame">' + s.streak + "</b> week" + (s.streak === 1 ? "" : "s")
-              + " in a row " + (s.streak > 1 ? "🔥" : "")
-            : "<b>—</b> no streak yet") + "</div>"
+              + " hitting " + s.goal + " " + (s.streak > 1 ? "🔥" : "")
+            : s.showed > 0
+              ? '<b>' + s.showed + "</b> week" + (s.showed === 1 ? "" : "s") + " running"
+              : "<b>—</b> nothing logged yet") + "</div>"
         + '<div class="fact">' + (s.last === null ? "no sessions yet"
             : s.since === 0 ? "went today"
             : s.since === 1 ? "went yesterday"
@@ -938,19 +992,29 @@
     d.members.forEach(function (m) {
       var col = PC[m.color % PC.length], days = daysOf(m.user_id), s = stats(m);
       h += '<tr><th class="rowname" style="color:' + col + '">' + esc(m.profiles.name) + "</th>";
+      var isMine = m.user_id === uid();
       wk.forEach(function (k) {
         var on = !!days[k], fut = k > td;
-        h += "<td" + (k === td ? ' class="col-today"' : "") + '><div class="mk '
-          + (on ? "on" : (fut ? "fut" : "")) + '" style="--pc:' + col + '">' + (on ? "✓" : "") + "</div></td>";
+        var cls = "mk " + (on ? "on" : (fut ? "fut" : ""));
+        var inner = on ? "✓" : "";
+        h += "<td" + (k === td ? ' class="col-today"' : "") + ">"
+          + (isMine && !fut
+              ? '<button class="' + cls + ' tap" style="--pc:' + col + '" data-act="toggleday" '
+                + 'data-day="' + k + '" aria-label="' + (on ? "Remove" : "Add") + " session on "
+                + esc(fromKey(k).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" }))
+                + '">' + inner + "</button>"
+              : '<div class="' + cls + '" style="--pc:' + col + '">' + inner + "</div>")
+          + "</td>";
       });
       h += '<td class="tally">' + s.thisWeek + "/" + s.goal + "</td></tr>";
     });
-    h += "</tbody></table></div></section>";
+    h += "</tbody></table>"
+      + '<div class="note gridhint">Tap any day on your own row to add or remove a session.</div>'
+      + "</div></section>";
 
     h += '<section class="sect"><div class="sect-head"><h2>The thread</h2></div>' + thread(waiting) + "</section>";
 
     h += '<div class="footer">'
-      + '<button class="linkish" data-act="me">Your private log</button>'
       + '<button class="linkish" data-act="copy">Copy board link</button>'
       + '<button class="linkish" data-act="rename">Change your name</button>'
       + '<button class="linkish" data-act="leaveboard">Leave board</button>'
@@ -1004,54 +1068,97 @@
     }).join("") + "</div>";
   }
 
+  function weekLabel(wkey) {
+    var thisW = dkey(weekStart(new Date()));
+    var d = fromKey(thisW);
+    var lastW = dkey(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 7));
+    if (wkey === thisW) return "This week";
+    if (wkey === lastW) return "Last week";
+    return "Week of " + fromKey(wkey).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+
+  /* The thread used to be a wall: every check-in a full card with a
+     row of chips. Now only what needs an answer — or what you opened —
+     is a card; the rest is one line. */
   function thread(waiting) {
     var waitingIds = {};
     waiting.forEach(function (c) { waitingIds[c.id] = 1; });
 
     var items = [];
     (App.d.checkins || []).forEach(function (c) {
-      items.push({ ts: new Date(c.created_at || String(c.day).slice(0, 10)).getTime(), kind: "c", c: c });
+      var day = String(c.day).slice(0, 10);
+      items.push({ ts: new Date(c.created_at || day).getTime(), day: day, kind: "c", c: c });
     });
     (App.d.events || []).forEach(function (e) {
-      items.push({ ts: new Date(e.created_at).getTime(), kind: "e", e: e });
+      items.push({ ts: new Date(e.created_at).getTime(),
+                   day: String(e.created_at).slice(0, 10), kind: "e", e: e });
     });
     items.sort(function (a, b) { return b.ts - a.ts; });
-    items = items.slice(0, 12);
-
     if (!items.length) return '<div class="empty">Nothing here yet. Someone has to go first.</div>';
 
-    return '<div class="thread">' + items.map(function (it) {
-      if (it.kind === "c") {
-        var c = it.c, m = memberOf(c.user_id);
-        if (!m) return "";
-        var col = PC[m.color % PC.length];
-        var day = String(c.day).slice(0, 10);
-        return '<div class="item' + (waitingIds[c.id] ? " unanswered" : "") + '" style="--pc:' + col + '">'
-          + '<div class="av">' + esc(initials(m.profiles.name)) + '</div><div class="body">'
-          + '<div class="line"><b>' + esc(m.profiles.name) + "</b> "
-          + (c.user_id === uid() ? "went to the gym" : "went to the gym") + "</div>"
-          + '<div class="meta">'
-          + esc(fromKey(day).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }))
-          + (c.created_at ? " · " + ago(c.created_at) : "") + "</div>"
-          + commentList(c.id)
-          + rxRow(c.id)
-          + (App.openComment === c.id || waitingIds[c.id]
-              ? sayRow(c.id, "Say something…", "c", "comment") : "")
-          + "</div></div>";
-      }
-      var e = it.e;
-      if (e.kind === "nudge") {
-        return '<div class="item sys"><div class="av" style="background:var(--accent);color:var(--accent-ink)">→</div>'
-          + '<div class="body"><div class="line"><b>' + esc(nameOf(e.user_id)) + "</b> to <b>"
-          + esc(nameOf(e.target_user_id)) + "</b> — " + esc(e.body || "your move") + "</div>"
-          + '<div class="meta">' + ago(e.created_at) + "</div></div></div>";
-      }
-      return '<div class="item sys"><div class="av" style="background:var(--muted)">'
-        + esc(initials(nameOf(e.user_id))) + '</div><div class="body">'
-        + '<div class="line"><b>' + esc(nameOf(e.user_id)) + "</b> joined the board</div>"
-        + '<div class="meta">' + ago(e.created_at) + "</div></div></div>";
-    }).join("") + "</div>";
+    var order = [], byWeek = {};
+    items.forEach(function (it) {
+      var w = dkey(weekStart(fromKey(it.day)));
+      if (!byWeek[w]) { byWeek[w] = []; order.push(w); }
+      byWeek[w].push(it);
+    });
+    order = order.slice(0, 5);
+
+    return order.map(function (w) {
+      return '<div class="tgroup"><div class="tglabel">' + esc(weekLabel(w)) + "</div>"
+        + byWeek[w].map(function (it) { return threadItem(it, waitingIds); }).join("")
+        + "</div>";
+    }).join("");
   }
+
+  function threadItem(it, waitingIds) {
+    if (it.kind === "e") {
+      var e = it.e;
+      var text = e.kind === "nudge"
+        ? "<b>" + esc(nameOf(e.user_id)) + "</b> nudged <b>" + esc(nameOf(e.target_user_id))
+          + "</b> — " + esc(e.body || "your move")
+        : "<b>" + esc(nameOf(e.user_id)) + "</b> joined the board";
+      return '<div class="trow sys"><span class="tname">' + text + "</span>"
+        + '<span class="tday">' + esc(ago(e.created_at)) + "</span></div>";
+    }
+
+    var c = it.c, m = memberOf(c.user_id);
+    if (!m) return "";
+    var col = PC[m.color % PC.length];
+    var day = it.day;
+    var mine = c.user_id === uid();
+    var open = !!waitingIds[c.id] || App.openItem === c.id;
+    var rs = reactionsFor(c.id), cs = commentsFor(c.id);
+    var dd = fromKey(day);
+    var dayShort = DAYS[(dd.getDay() + 6) % 7] + " " + dd.getDate();
+
+    if (!open) {
+      var bits = "";
+      if (rs.length) bits += '<span class="tb">' + esc(rs[0].emoji)
+        + (rs.length > 1 ? " " + rs.length : "") + "</span>";
+      if (cs.length) bits += '<span class="tb">💬 ' + cs.length + "</span>";
+      return '<button class="trow" data-act="expand" data-id="' + c.id + '" style="--pc:' + col + '">'
+        + '<span class="tdot"></span>'
+        + '<span class="tname">' + esc(m.profiles.name) + (mine ? " (you)" : "") + "</span>"
+        + '<span class="tday">' + esc(dayShort) + "</span>"
+        + '<span class="tmeta">' + bits + "</span></button>";
+    }
+
+    return '<div class="item' + (waitingIds[c.id] ? " unanswered" : "") + '" style="--pc:' + col + '">'
+      + '<div class="av">' + esc(initials(m.profiles.name)) + '</div><div class="body">'
+      + '<div class="line"><b>' + esc(m.profiles.name) + "</b> went to the gym</div>"
+      + '<div class="meta">'
+      + esc(fromKey(day).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }))
+      + (c.created_at ? " · " + ago(c.created_at) : "") + "</div>"
+      + commentList(c.id)
+      + rxRow(c.id)
+      + (App.openComment === c.id || waitingIds[c.id]
+          ? sayRow(c.id, "Say something…", "c", "comment") : "")
+      + (App.openItem === c.id && !waitingIds[c.id]
+          ? '<button class="linkish" data-act="expand" data-id="' + c.id + '">close</button>' : "")
+      + "</div></div>";
+  }
+
 
   /* ============================================================
      The private log — meals and weight
@@ -1403,6 +1510,7 @@
     App.d = null;
     App.error = null;
     App.openComment = null;
+    App.openItem = null;
     render();
     watch();
     if (App.user) load();
