@@ -1,14 +1,15 @@
 /* ============================================================
-   Iron Ledger
-   A shared gym check-in board for two or three people.
+   Iron Ledger  —  v2
 
    Design rules this file is built around:
      1. Answering your partner outranks logging yourself.
-     2. The unit of value is the pair, not the individual.
+     2. The unit of value is the group, not the individual.
      3. Streaks count weeks you hit your goal; rest weeks never
         break them. No loss-aversion, no shaming copy.
-     4. The invite is the product. At one member, nothing else
-        on screen matters.
+     4. A check-in belongs to YOU, not to a board. Log the gym
+        once and every board you're on sees it.
+     5. What people SAY about a check-in stays on the board it
+        was said on. Shared attendance, separate conversations.
    ============================================================ */
 (function () {
   "use strict";
@@ -28,17 +29,16 @@
   ];
   var NUDGE_COOLDOWN_H = 20;
   var ANSWER_WINDOW_DAYS = 4;
+  var HISTORY_DAYS = 400;
 
   var cfg = window.IRON_LEDGER_CONFIG || {};
-  var ONLINE = !!(cfg.SUPABASE_URL && cfg.SUPABASE_ANON && window.supabase);
-
-  /* Local storage is namespaced per database. A board created in demo
-     mode lives under a different prefix from one on your Supabase
-     project, so switching sync on can never leave the app pointing at
-     a board that isn't there (and two projects never collide). */
-  var NS = "il." + (ONLINE
-    ? String(cfg.SUPABASE_URL).replace(/[^a-z0-9]/gi, "").slice(-10)
-    : "demo") + ".";
+  var CONFIGURED = !!(cfg.SUPABASE_URL && cfg.SUPABASE_ANON && window.supabase);
+  var sb = CONFIGURED
+    ? window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON, {
+        auth: { persistSession: true, autoRefreshToken: true },
+        realtime: { params: { eventsPerSecond: 4 } }
+      })
+    : null;
 
   /* ---------------- small helpers ---------------- */
 
@@ -52,6 +52,7 @@
   function dkey(d) { return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); }
   function fromKey(k) { var a = String(k).slice(0, 10).split("-"); return new Date(+a[0], +a[1] - 1, +a[2]); }
   function today() { return dkey(new Date()); }
+  function daysAgoKey(n) { var d = new Date(); d.setDate(d.getDate() - n); return dkey(d); }
   function weekStart(d) {
     var x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
     x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
@@ -63,13 +64,6 @@
     return out;
   }
   function dayDiff(a, b) { return Math.round((fromKey(b) - fromKey(a)) / 86400000); }
-  function uuid() {
-    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
-      var r = (Math.random() * 16) | 0;
-      return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-    });
-  }
   function initials(n) { return String(n).trim().slice(0, 2).toUpperCase(); }
   function ago(ts) {
     var m = Math.floor((Date.now() - new Date(ts).getTime()) / 60000);
@@ -87,10 +81,6 @@
     clearTimeout(toast._t);
     toast._t = setTimeout(function () { t.classList.remove("show"); }, 2800);
   }
-  /* A tap should feel like it did something. Sparks thrown from the
-     element that was pressed, plus a nudge of haptics where the
-     platform offers any (iOS Safari does not, so the animation has
-     to carry it). */
   function burst(el, count) {
     try {
       if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
@@ -110,7 +100,7 @@
         s.style.setProperty("--rot", (Math.random() * 360 | 0) + "deg");
         s.style.background = "var(" + cols[i % cols.length] + ")";
         s.style.animationDelay = (Math.random() * 70 | 0) + "ms";
-        if (i % 3 === 0) {          // a few confetti flecks among the dots
+        if (i % 3 === 0) {
           s.style.borderRadius = "3px";
           s.style.width = "9px"; s.style.height = "13px";
           s.style.margin = "-6px 0 0 -4.5px";
@@ -122,206 +112,171 @@
     } catch (e) {}
   }
   function buzz(ms) { try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {} }
-
-  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
-  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
-  function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+  function unwrap(res) { if (res.error) throw res.error; return res.data; }
 
   /* ============================================================
-     Data layer. Two interchangeable stores: Supabase when it is
-     configured, localStorage when it is not, so the app is
-     openable and playable before anyone signs up for anything.
-     ============================================================ */
-
-  var store = ONLINE ? supabaseStore() : localStore();
-
-  function supabaseStore() {
-    var sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON, {
-      realtime: { params: { eventsPerSecond: 4 } }
-    });
-    function rows(t) { return sb.from(t); }
-    function unwrap(res) { if (res.error) throw res.error; return res.data; }
-
-    return {
-      online: true,
-      createRoom: function (roomName) {
-        return rows("rooms").insert({ name: roomName }).select().single().then(unwrap);
-      },
-      fetchAll: function (roomId) {
-        return Promise.all([
-          rows("rooms").select("*").eq("id", roomId).maybeSingle(),
-          rows("members").select("*").eq("room_id", roomId).order("created_at"),
-          rows("checkins").select("*").eq("room_id", roomId),
-          rows("replies").select("*").eq("room_id", roomId).order("created_at"),
-          rows("rest_weeks").select("*").eq("room_id", roomId),
-          rows("events").select("*").eq("room_id", roomId).order("created_at", { ascending: false }).limit(40)
-        ]).then(function (r) {
-          return {
-            room: unwrap(r[0]), members: unwrap(r[1]), checkins: unwrap(r[2]),
-            replies: unwrap(r[3]), rest: unwrap(r[4]), events: unwrap(r[5])
-          };
-        });
-      },
-      addMember: function (roomId, m) {
-        return rows("members").insert({
-          room_id: roomId, name: m.name, color: m.color, goal: m.goal
-        }).select().single().then(unwrap);
-      },
-      patchMember: function (id, patch) { return rows("members").update(patch).eq("id", id).then(unwrap); },
-      addCheckin: function (roomId, memberId, day) {
-        return rows("checkins").insert({ room_id: roomId, member_id: memberId, day: day }).then(function (r) {
-          if (r.error && r.error.code !== "23505") throw r.error;  // ignore duplicate
-        });
-      },
-      delCheckin: function (id) { return rows("checkins").delete().eq("id", id).then(unwrap); },
-      addReply: function (roomId, checkinId, memberId, r) {
-        return rows("replies").insert({
-          room_id: roomId, checkin_id: checkinId, member_id: memberId,
-          emoji: r.emoji || null, body: r.body || null
-        }).then(function (res) { if (res.error && res.error.code !== "23505") throw res.error; });
-      },
-      delReply: function (id) { return rows("replies").delete().eq("id", id).then(unwrap); },
-      setRest: function (roomId, memberId, week, on) {
-        return on
-          ? rows("rest_weeks").insert({ room_id: roomId, member_id: memberId, week: week })
-              .then(function (r) { if (r.error && r.error.code !== "23505") throw r.error; })
-          : rows("rest_weeks").delete().eq("member_id", memberId).eq("week", week).then(unwrap);
-      },
-      addEvent: function (roomId, memberId, kind, targetId, body) {
-        return rows("events").insert({
-          room_id: roomId, member_id: memberId, kind: kind, target_id: targetId || null, body: body || null
-        }).then(unwrap);
-      },
-      subscribe: function (roomId, cb) {
-        var ch = sb.channel("board:" + roomId);
-        ["members", "checkins", "replies", "rest_weeks", "events", "rooms"].forEach(function (t) {
-          ch.on("postgres_changes",
-            { event: "*", schema: "public", table: t, filter: t === "rooms" ? "id=eq." + roomId : "room_id=eq." + roomId },
-            cb);
-        });
-        ch.subscribe();
-        return function () { sb.removeChannel(ch); };
-      }
-    };
-  }
-
-  function localStore() {
-    function key(roomId) { return NS + "local." + roomId; }
-    function read(roomId) {
-      try { return JSON.parse(lsGet(key(roomId))) || blank(roomId); } catch (e) { return blank(roomId); }
-    }
-    function blank(roomId) {
-      // room stays null for an id this browser has never stored, so an
-      // unknown board behaves the same here as it does against Supabase.
-      return { room: null, members: [], checkins: [], replies: [], rest: [], events: [] };
-    }
-    function write(roomId, d) { lsSet(key(roomId), JSON.stringify(d)); return d; }
-    function edit(roomId, fn) { var d = read(roomId); fn(d); write(roomId, d); return Promise.resolve(); }
-    var now = function () { return new Date().toISOString(); };
-
-    return {
-      online: false,
-      createRoom: function (roomName) {
-        var r = { id: uuid(), name: roomName };
-        write(r.id, { room: r, members: [], checkins: [], replies: [], rest: [], events: [] });
-        return Promise.resolve(r);
-      },
-      fetchAll: function (roomId) { return Promise.resolve(read(roomId)); },
-      addMember: function (roomId, m) {
-        var mem = { id: uuid(), room_id: roomId, name: m.name, color: m.color, goal: m.goal,
-                    nudges_on: true, created_at: now() };
-        return edit(roomId, function (d) { d.members.push(mem); }).then(function () { return mem; });
-      },
-      patchMember: function (id, patch) {
-        var roomId = App.roomId;
-        return edit(roomId, function (d) {
-          d.members.forEach(function (m) { if (m.id === id) Object.keys(patch).forEach(function (k) { m[k] = patch[k]; }); });
-        });
-      },
-      addCheckin: function (roomId, memberId, day) {
-        return edit(roomId, function (d) {
-          if (d.checkins.some(function (c) { return c.member_id === memberId && c.day === day; })) return;
-          d.checkins.push({ id: uuid(), room_id: roomId, member_id: memberId, day: day, created_at: now() });
-        });
-      },
-      delCheckin: function (id) {
-        return edit(App.roomId, function (d) {
-          d.checkins = d.checkins.filter(function (c) { return c.id !== id; });
-          d.replies = d.replies.filter(function (r) { return r.checkin_id !== id; });
-        });
-      },
-      addReply: function (roomId, checkinId, memberId, r) {
-        return edit(roomId, function (d) {
-          if (r.emoji && d.replies.some(function (x) {
-            return x.checkin_id === checkinId && x.member_id === memberId && x.emoji === r.emoji;
-          })) return;
-          d.replies.push({ id: uuid(), room_id: roomId, checkin_id: checkinId, member_id: memberId,
-                           emoji: r.emoji || null, body: r.body || null, created_at: now() });
-        });
-      },
-      delReply: function (id) {
-        return edit(App.roomId, function (d) { d.replies = d.replies.filter(function (r) { return r.id !== id; }); });
-      },
-      setRest: function (roomId, memberId, week, on) {
-        return edit(roomId, function (d) {
-          d.rest = d.rest.filter(function (x) { return !(x.member_id === memberId && x.week === week); });
-          if (on) d.rest.push({ id: uuid(), room_id: roomId, member_id: memberId, week: week });
-        });
-      },
-      addEvent: function (roomId, memberId, kind, targetId, body) {
-        return edit(roomId, function (d) {
-          d.events.unshift({ id: uuid(), room_id: roomId, member_id: memberId, kind: kind,
-                             target_id: targetId || null, body: body || null, created_at: now() });
-          d.events = d.events.slice(0, 40);
-        });
-      },
-      subscribe: function () { return function () {}; }
-    };
-  }
-
-  /* ============================================================
-     App state
+     State
      ============================================================ */
 
   var App = {
-    roomId: null,
-    meId: null,
-    data: null,
+    booted: false,
+    user: null,          // auth user
+    profile: null,       // { id, name }
+    myBoards: [],        // [{ board_id, goal, boards:{id,name} }]
+    route: { name: "boards", boardId: null },
+    d: null,             // loaded board data
     loading: true,
     error: null,
     notice: null,
+    authMode: "in",      // "in" | "up"
+    authBusy: false,
+    authMsg: null,
+    openComment: null,   // checkin id whose comment box is open
     justChecked: false,
     unsub: null
   };
   var root = $("root");
 
-  function routeRoom() {
+  function parseRoute() {
     var m = /#\/b\/([0-9a-fA-F-]{8,})/.exec(location.hash || "");
-    return m ? m[1] : null;
+    return m ? { name: "board", boardId: m[1] } : { name: "boards", boardId: null };
   }
-  function me() { return App.data ? byId(App.data.members, App.meId) : null; }
-  function byId(list, id) {
-    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
-    return null;
+  function go(hash) {
+    if ((location.hash || "") === hash) return;
+    location.hash = hash;
   }
-  function others() {
-    return App.data.members.filter(function (m) { return m.id !== App.meId; });
+  function uid() { return App.user ? App.user.id : null; }
+
+  /* ============================================================
+     Loading
+     ============================================================ */
+
+  function loadMyBoards() {
+    return sb.from("board_members")
+      .select("board_id, goal, boards(id,name)")
+      .eq("user_id", uid())
+      .then(unwrap)
+      .then(function (rows) {
+        App.myBoards = (rows || []).filter(function (r) { return r.boards; });
+        return App.myBoards;
+      });
   }
 
-  /* ---------------- derived stats ---------------- */
+  function loadBoardsScreen() {
+    var since = daysAgoKey(HISTORY_DAYS);
+    return loadMyBoards().then(function (rows) {
+      var ids = rows.map(function (r) { return r.board_id; });
+      return Promise.all([
+        ids.length
+          ? sb.from("board_members").select("board_id, user_id, profiles(name)").in("board_id", ids).then(unwrap)
+          : Promise.resolve([]),
+        sb.from("checkins").select("*").eq("user_id", uid()).gte("day", since).then(unwrap)
+      ]).then(function (r) {
+        App.d = { rosters: r[0] || [], myCheckins: r[1] || [] };
+      });
+    });
+  }
 
-  function daysOf(memberId) {
+  function loadBoard(boardId) {
+    var since = daysAgoKey(HISTORY_DAYS);
+    return Promise.all([
+      sb.from("boards").select("*").eq("id", boardId).maybeSingle().then(unwrap),
+      sb.from("board_members").select("*, profiles(id,name)").eq("board_id", boardId)
+        .order("joined_at").then(unwrap)
+    ]).then(function (r) {
+      var board = r[0], members = r[1] || [];
+      if (!board) return { missing: true };
+      var mine = members.filter(function (m) { return m.user_id === uid(); })[0];
+      if (!mine) return { board: board, members: [], isMember: false };
+
+      var userIds = members.map(function (m) { return m.user_id; });
+      return Promise.all([
+        sb.from("checkins").select("*").in("user_id", userIds).gte("day", since).then(unwrap),
+        sb.from("rest_weeks").select("*").in("user_id", userIds).then(unwrap),
+        sb.from("comments").select("*").eq("board_id", boardId).order("created_at").then(unwrap),
+        sb.from("reactions").select("*").eq("board_id", boardId).then(unwrap),
+        sb.from("events").select("*").eq("board_id", boardId)
+          .order("created_at", { ascending: false }).limit(40).then(unwrap)
+      ]).then(function (x) {
+        return {
+          board: board, members: members, isMember: true, me: mine,
+          checkins: x[0] || [], rest: x[1] || [], comments: x[2] || [],
+          reactions: x[3] || [], events: x[4] || []
+        };
+      });
+    });
+  }
+
+  function load() {
+    if (!App.user) { App.loading = false; return render(); }
+    App.loading = true;
+    var r = App.route;
+    var job = r.name === "board"
+      ? loadMyBoards().then(function () { return loadBoard(r.boardId); }).then(function (d) {
+          if (d.missing) {
+            App.d = null;
+            App.error = "That board doesn't exist. The link may be wrong, or it was deleted.";
+          } else { App.d = d; App.error = null; }
+        })
+      : loadBoardsScreen().then(function () { App.error = null; });
+
+    return job.then(function () {
+      App.loading = false;
+      render();
+    }).catch(function (e) {
+      App.loading = false;
+      App.error = (e && e.message) || "Couldn't reach the database.";
+      render();
+    });
+  }
+
+  var reloadTimer = null;
+  function scheduleReload() { clearTimeout(reloadTimer); reloadTimer = setTimeout(load, 300); }
+
+  function watch() {
+    if (App.unsub) { App.unsub(); App.unsub = null; }
+    if (!App.user) return;
+    var ch = sb.channel("il:" + (App.route.boardId || "boards") + ":" + uid());
+    // Board-scoped tables filter server-side; the person-scoped ones
+    // rely on row-level security to deliver only what we may see.
+    ["comments", "reactions", "events", "board_members"].forEach(function (t) {
+      ch.on("postgres_changes",
+        App.route.boardId
+          ? { event: "*", schema: "public", table: t, filter: "board_id=eq." + App.route.boardId }
+          : { event: "*", schema: "public", table: t },
+        scheduleReload);
+    });
+    ["checkins", "rest_weeks"].forEach(function (t) {
+      ch.on("postgres_changes", { event: "*", schema: "public", table: t }, scheduleReload);
+    });
+    ch.subscribe();
+    App.unsub = function () { sb.removeChannel(ch); };
+  }
+
+  function act(promise) {
+    return Promise.resolve(promise).then(load).catch(function (e) {
+      toast((e && e.message) || "That didn't save — try again");
+    });
+  }
+
+  /* ============================================================
+     Derived numbers
+     ============================================================ */
+
+  function daysOf(userId) {
     var s = {};
-    App.data.checkins.forEach(function (c) { if (c.member_id === memberId) s[String(c.day).slice(0, 10)] = c; });
+    (App.d.checkins || []).forEach(function (c) {
+      if (c.user_id === userId) s[String(c.day).slice(0, 10)] = c;
+    });
     return s;
   }
-  function isResting(memberId, weekKey) {
-    return App.data.rest.some(function (r) {
-      return r.member_id === memberId && String(r.week).slice(0, 10) === weekKey;
+  function isResting(userId, weekKey) {
+    return (App.d.rest || []).some(function (r) {
+      return r.user_id === userId && String(r.week).slice(0, 10) === weekKey;
     });
   }
   function stats(m) {
-    var days = daysOf(m.id);
+    var days = daysOf(m.user_id);
     var wk = weekKeys(weekStart(new Date()));
     var thisWeek = wk.filter(function (k) { return days[k]; }).length;
     var goal = Math.max(1, m.goal || 4);
@@ -332,13 +287,11 @@
       weeks[w] = (weeks[w] || 0) + 1;
     });
 
-    // Streak: consecutive weeks hit. A rest week holds the streak
-    // without adding to it. The current week never breaks it.
     var streak = 0, cur = weekStart(new Date()), i = 0, first = true;
     while (i < 200) {
       var wkey = dkey(cur);
       var hit = (weeks[wkey] || 0) >= goal;
-      var rest = isResting(m.id, wkey);
+      var rest = isResting(m.user_id, wkey);
       if (hit) streak++;
       else if (rest) { /* holds */ }
       else if (!first) break;
@@ -351,115 +304,57 @@
     Object.keys(days).forEach(function (k) { if (!last || k > last) last = k; });
 
     return {
-      goal: goal,
-      thisWeek: thisWeek,
-      total: Object.keys(days).length,
-      streak: streak,
-      resting: isResting(m.id, dkey(weekStart(new Date()))),
-      last: last,
-      since: last ? dayDiff(last, today()) : null
+      goal: goal, thisWeek: thisWeek, total: Object.keys(days).length, streak: streak,
+      resting: isResting(m.user_id, dkey(weekStart(new Date()))),
+      last: last, since: last ? dayDiff(last, today()) : null
     };
   }
-  function pairStats() {
-    var ms = App.data.members;
-    var sum = 0, goal = 0;
+  function groupStats() {
+    var ms = App.d.members, sum = 0, goal = 0;
     ms.forEach(function (m) { var s = stats(m); sum += s.thisWeek; goal += s.goal; });
-
-    // Weeks where everyone hit their goal (or was resting).
     var allWeeks = {};
-    App.data.checkins.forEach(function (c) { allWeeks[dkey(weekStart(fromKey(String(c.day).slice(0, 10))))] = 1; });
-    var together = 0, thisW = dkey(weekStart(new Date()));
+    (App.d.checkins || []).forEach(function (c) {
+      allWeeks[dkey(weekStart(fromKey(String(c.day).slice(0, 10))))] = 1;
+    });
+    var together = 0;
     Object.keys(allWeeks).forEach(function (w) {
       if (!ms.length) return;
       var ok = ms.every(function (m) {
-        if (isResting(m.id, w)) return true;
-        var days = daysOf(m.id);
+        if (isResting(m.user_id, w)) return true;
+        var days = daysOf(m.user_id);
         var n = weekKeys(fromKey(w)).filter(function (k) { return days[k]; }).length;
         return n >= Math.max(1, m.goal || 4);
       });
-      if (ok && w !== thisW) together++;
-      else if (ok && w === thisW) together++;
+      if (ok) together++;
     });
     return { sum: sum, goal: Math.max(1, goal), together: together };
   }
-  function repliesFor(checkinId) {
-    return App.data.replies.filter(function (r) { return r.checkin_id === checkinId; });
+  function nameOf(userId) {
+    var m = (App.d.members || []).filter(function (x) { return x.user_id === userId; })[0];
+    return m && m.profiles ? m.profiles.name : "someone";
   }
-  /* Every recent check-in by someone else that I have not answered. */
+  function memberOf(userId) {
+    return (App.d.members || []).filter(function (x) { return x.user_id === userId; })[0];
+  }
+  function reactionsFor(cid) {
+    return (App.d.reactions || []).filter(function (r) { return r.checkin_id === cid; });
+  }
+  function commentsFor(cid) {
+    return (App.d.comments || []).filter(function (c) { return c.checkin_id === cid; });
+  }
   function waitingOnMe() {
-    if (!App.meId) return [];
+    if (!App.d || !App.d.isMember) return [];
     var t = today();
-    return App.data.checkins
+    return (App.d.checkins || [])
       .filter(function (c) {
-        if (c.member_id === App.meId) return false;
+        if (c.user_id === uid()) return false;
         var d = String(c.day).slice(0, 10);
         if (dayDiff(d, t) > ANSWER_WINDOW_DAYS) return false;
-        return !repliesFor(c.id).some(function (r) { return r.member_id === App.meId; });
+        var answered = reactionsFor(c.id).some(function (r) { return r.user_id === uid(); })
+          || commentsFor(c.id).some(function (x) { return x.user_id === uid(); });
+        return !answered;
       })
       .sort(function (a, b) { return String(b.day).localeCompare(String(a.day)); });
-  }
-
-  /* ============================================================
-     Loading + realtime
-     ============================================================ */
-
-  function forgetBoard(id) {
-    if (!id) return;
-    lsDel(NS + "me." + id);
-    if (lsGet(NS + "lastRoom") === id) lsDel(NS + "lastRoom");
-  }
-  function goHome(notice) {
-    forgetBoard(App.roomId);
-    App.roomId = null; App.meId = null; App.data = null;
-    App.error = null; App.loading = false;
-    App.notice = notice || null;
-    // replaceState, not location.replace: dropping the fragment with
-    // the latter can reload the document in some browsers, which would
-    // throw away the message we are about to show.
-    try {
-      if (window.history && history.replaceState) {
-        history.replaceState(null, "", location.pathname + location.search);
-      } else if (location.hash) {
-        location.hash = "";
-      }
-    } catch (e) {}
-    render();
-  }
-
-  function load() {
-    if (!App.roomId) { App.loading = false; return render(); }
-    return store.fetchAll(App.roomId).then(function (d) {
-      if (!d.room) {
-        // Pointing at a board this database has never heard of. Rather
-        // than dead-ending, forget it and offer a fresh start.
-        return goHome("That board isn't on your database \u2014 it was probably "
-          + "created before you switched sync on. Start a fresh one below.");
-      }
-      App.data = d;
-      App.loading = false;
-      App.error = null;
-      if (App.meId && !byId(App.data.members, App.meId)) App.meId = null;
-      render();
-    }).catch(function (e) {
-      App.loading = false;
-      App.error = (e && e.message) || "Couldn't reach the board.";
-      render();
-    });
-  }
-  var reloadTimer = null;
-  function scheduleReload() {
-    clearTimeout(reloadTimer);
-    reloadTimer = setTimeout(load, 300);
-  }
-  function watch() {
-    if (App.unsub) App.unsub();
-    App.unsub = App.roomId ? store.subscribe(App.roomId, scheduleReload) : null;
-  }
-
-  function act(promise) {
-    return Promise.resolve(promise).then(load).catch(function (e) {
-      toast((e && e.message) || "That didn't save — try again");
-    });
   }
 
   /* ============================================================
@@ -467,70 +362,101 @@
      ============================================================ */
 
   var actions = {
-    create: function () {
-      var nameEl = $("yourname");
-      var name = (nameEl && nameEl.value || "").trim();
-      if (!name) { toast("Type your name first"); if (nameEl) nameEl.focus(); return; }
-      store.createRoom("Our board").then(function (room) {
-        return store.addMember(room.id, { name: name.slice(0, 24), color: 0, goal: 4 }).then(function (m) {
-          lsSet(NS + "me." + room.id, m.id);
-          lsSet(NS + "lastRoom", room.id);
-          store.addEvent(room.id, m.id, "join");
-          App.roomId = room.id;
-          App.meId = m.id;
-          location.hash = "#/b/" + room.id;
-          watch();
-          return load();
-        });
-      }).catch(function (e) { toast((e && e.message) || "Couldn't create the board"); });
-    },
-    reopen: function (el) {
-      location.hash = "#/b/" + el.getAttribute("data-id");
-    },
-    pick: function (el) {
-      App.meId = el.getAttribute("data-id");
-      lsSet(NS + "me." + App.roomId, App.meId);
-      lsSet(NS + "lastRoom", App.roomId);
+    /* ---- account ---- */
+    authmode: function (el) {
+      App.authMode = el.getAttribute("data-mode");
+      App.authMsg = null;
       render();
     },
-    join: function () {
-      var el = $("joinname");
-      var name = (el && el.value || "").trim();
-      if (!name) { toast("Type your name first"); if (el) el.focus(); return; }
+    signin: function () {
+      var email = ($("email") || {}).value, pw = ($("password") || {}).value;
+      var name = ($("yourname") || {}).value;
+      if (!email || !pw) { toast("Email and password, please"); return; }
+      App.authBusy = true; App.authMsg = null; render();
 
-      // Same name as someone already here? That's them on another
-      // device, not a second person. Pick them instead of duplicating.
-      var already = App.data.members.filter(function (m) {
-        return String(m.name).trim().toLowerCase() === name.toLowerCase();
-      })[0];
-      if (already) {
-        App.meId = already.id;
-        lsSet(NS + "me." + App.roomId, already.id);
-        lsSet(NS + "lastRoom", App.roomId);
-        toast("Welcome back, " + already.name);
+      var p = App.authMode === "up"
+        ? sb.auth.signUp({
+            email: email.trim(), password: pw,
+            options: { data: { name: (name || "").trim() || email.split("@")[0] } }
+          })
+        : sb.auth.signInWithPassword({ email: email.trim(), password: pw });
+
+      p.then(function (res) {
+        App.authBusy = false;
+        if (res.error) {
+          App.authMsg = res.error.message;
+          // "already registered" almost always means they meant to sign in.
+          if (/already registered|already exists/i.test(res.error.message)) {
+            App.authMode = "in";
+            App.authMsg = "That email already has an account — sign in instead.";
+          }
+          render();
+          return;
+        }
+        if (!res.data.session) {
+          // Email confirmation is switched on for this project.
+          App.authMsg = "Account made. Check your email for the confirmation link "
+            + "— or switch off \"Confirm email\" in Supabase → Authentication → Sign In / Providers.";
+          render();
+          return;
+        }
+        // onAuthStateChange takes it from here.
+      }, function (e) {
+        App.authBusy = false;
+        App.authMsg = (e && e.message) || "That didn't work";
         render();
-        return;
-      }
+      });
+    },
+    signout: function () {
+      sb.auth.signOut().then(function () {
+        App.user = null; App.profile = null; App.myBoards = []; App.d = null;
+        App.authMode = "in";          // come back to the sign-in form, not sign-up
+        App.authMsg = null;
+        App.authBusy = false;
+        go("#/boards");
+        render();
+      });
+    },
 
-      var color = App.data.members.length % PC.length;
-      store.addMember(App.roomId, { name: name.slice(0, 24), color: color, goal: 4 }).then(function (m) {
-        App.meId = m.id;
-        lsSet(NS + "me." + App.roomId, m.id);
-        lsSet(NS + "lastRoom", App.roomId);
-        return store.addEvent(App.roomId, m.id, "join").then(load);
-      }).catch(function (e) { toast((e && e.message) || "Couldn't join"); });
+    /* ---- boards ---- */
+    newboard: function () {
+      var el = $("boardname");
+      var name = (el && el.value || "").trim() || "Our board";
+      sb.from("boards").insert({ name: name.slice(0, 40), created_by: uid() })
+        .select().single().then(unwrap)
+        .then(function (b) {
+          return sb.from("board_members")
+            .insert({ board_id: b.id, user_id: uid(), goal: 4, color: 0 }).then(function (r) {
+              if (r.error) throw r.error;
+              return sb.from("events").insert({ board_id: b.id, user_id: uid(), kind: "join" });
+            }).then(function () { return b; });
+        })
+        .then(function (b) { go("#/b/" + b.id); })
+        .catch(function (e) { toast((e && e.message) || "Couldn't create that board"); });
     },
-    forget: function () { goHome(null); },
-    notme: function () {
-      lsDel(NS + "me." + App.roomId);
-      App.meId = null;
-      render();
+    openboard: function (el) { go("#/b/" + el.getAttribute("data-id")); },
+    boards: function () { go("#/boards"); },
+    joinboard: function () {
+      var bid = App.route.boardId;
+      var color = 0;
+      sb.from("board_members").insert({ board_id: bid, user_id: uid(), goal: 4, color: color })
+        .then(function (r) { if (r.error) throw r.error; })
+        .then(function () { return sb.from("events").insert({ board_id: bid, user_id: uid(), kind: "join" }); })
+        .then(load)
+        .catch(function (e) { toast((e && e.message) || "Couldn't join"); });
     },
+    leaveboard: function () {
+      if (!window.confirm("Leave this board? Your gym history stays with you — you just drop off this group.")) return;
+      sb.from("board_members").delete().eq("board_id", App.route.boardId).eq("user_id", uid())
+        .then(function () { go("#/boards"); load(); })
+        .catch(function (e) { toast((e && e.message) || "Couldn't leave"); });
+    },
+
+    /* ---- attendance ---- */
     checkin: function (el) {
-      if (!App.meId) return;
       if (el && el.classList) {
         el.classList.remove("pop");
-        void el.offsetWidth;            // restart the animation
+        void el.offsetWidth;
         el.classList.add("pop");
         el.textContent = "Nice one!";
         el.disabled = true;
@@ -538,61 +464,90 @@
       }
       buzz(18);
       App.justChecked = true;
-      // Let the squash-and-spring play out before the panel flips.
-      setTimeout(function () { act(store.addCheckin(App.roomId, App.meId, today())); }, 380);
+      setTimeout(function () {
+        act(sb.from("checkins").insert({ user_id: uid(), day: today() }).then(function (r) {
+          if (r.error && r.error.code !== "23505") throw r.error;
+        }));
+      }, 380);
     },
     undo: function () {
-      var c = App.data.checkins.filter(function (x) {
-        return x.member_id === App.meId && String(x.day).slice(0, 10) === today();
-      })[0];
-      if (c) act(store.delCheckin(c.id));
+      act(sb.from("checkins").delete().eq("user_id", uid()).eq("day", today()));
     },
+    rest: function () {
+      var w = dkey(weekStart(new Date()));
+      var on = isResting(uid(), w);
+      act(on
+        ? sb.from("rest_weeks").delete().eq("user_id", uid()).eq("week", w)
+        : sb.from("rest_weeks").insert({ user_id: uid(), week: w }).then(function (r) {
+            if (r.error && r.error.code !== "23505") throw r.error;
+          }));
+    },
+
+    /* ---- talking to each other ---- */
     react: function (el) {
-      if (!App.meId) return;
       var cid = el.getAttribute("data-id"), em = el.getAttribute("data-em");
-      var existing = repliesFor(cid).filter(function (r) {
-        return r.member_id === App.meId && r.emoji === em;
+      var mineR = reactionsFor(cid).filter(function (r) {
+        return r.user_id === uid() && r.emoji === em;
       })[0];
-      if (!existing) { burst(el, 7); buzz(12); }
-      act(existing ? store.delReply(existing.id) : store.addReply(App.roomId, cid, App.meId, { emoji: em }));
+      if (!mineR) { burst(el, 7); buzz(12); }
+      act(mineR
+        ? sb.from("reactions").delete().eq("id", mineR.id)
+        : sb.from("reactions").insert({
+            board_id: App.route.boardId, checkin_id: cid, user_id: uid(), emoji: em
+          }).then(function (r) { if (r.error && r.error.code !== "23505") throw r.error; }));
     },
-    say: function (el) {
-      if (!App.meId) return;
+    opencomment: function (el) {
       var cid = el.getAttribute("data-id");
-      var input = $(el.getAttribute("data-input") || ("say-" + cid));
+      App.openComment = App.openComment === cid ? null : cid;
+      render();
+      var box = $((App.openComment ? "c-" + App.openComment : ""));
+      if (box) box.focus();
+    },
+    comment: function (el) {
+      var cid = el.getAttribute("data-id");
+      var input = $(el.getAttribute("data-input") || ("c-" + cid));
       var body = (input && input.value || "").trim();
       if (!body) { if (input) input.focus(); return; }
       input.value = "";
-      act(store.addReply(App.roomId, cid, App.meId, { body: body.slice(0, 140) }));
+      App.openComment = null;
+      act(sb.from("comments").insert({
+        board_id: App.route.boardId, checkin_id: cid, user_id: uid(), body: body.slice(0, 280)
+      }));
     },
-    goal: function (el) {
-      var d = +el.getAttribute("data-d");
-      var m = me(); if (!m) return;
-      act(store.patchMember(m.id, { goal: Math.min(7, Math.max(1, (m.goal || 4) + d)) }));
-    },
-    rest: function () {
-      var m = me(); if (!m) return;
-      var w = dkey(weekStart(new Date()));
-      act(store.setRest(App.roomId, m.id, w, !isResting(m.id, w)));
-    },
-    nudges: function () {
-      var m = me(); if (!m) return;
-      act(store.patchMember(m.id, { nudges_on: !m.nudges_on }));
-    },
-    rename: function () {
-      var m = me(); if (!m) return;
-      var v = window.prompt("Your name on the board", m.name);
-      if (v === null) return;
-      v = v.trim(); if (!v) return;
-      act(store.patchMember(m.id, { name: v.slice(0, 24) }));
+    delcomment: function (el) {
+      act(sb.from("comments").delete().eq("id", el.getAttribute("data-id")));
     },
     nudge: function (el) {
-      if (!App.meId) return;
       var to = el.getAttribute("data-id");
-      act(store.addEvent(App.roomId, App.meId, "nudge", to,
-        NUDGES[Math.floor(Math.random() * NUDGES.length)]));
+      act(sb.from("events").insert({
+        board_id: App.route.boardId, user_id: uid(), kind: "nudge", target_user_id: to,
+        body: NUDGES[Math.floor(Math.random() * NUDGES.length)]
+      }));
       toast("Sent");
     },
+
+    /* ---- your settings on this board ---- */
+    goal: function (el) {
+      var d = +el.getAttribute("data-d");
+      var m = App.d.me;
+      act(sb.from("board_members")
+        .update({ goal: Math.min(7, Math.max(1, (m.goal || 4) + d)) })
+        .eq("board_id", App.route.boardId).eq("user_id", uid()));
+    },
+    nudges: function () {
+      var m = App.d.me;
+      act(sb.from("board_members").update({ nudges_on: !m.nudges_on })
+        .eq("board_id", App.route.boardId).eq("user_id", uid()));
+    },
+    rename: function () {
+      var v = window.prompt("Your name", App.profile ? App.profile.name : "");
+      if (v === null) return;
+      v = v.trim(); if (!v) return;
+      act(sb.from("profiles").update({ name: v.slice(0, 24) }).eq("id", uid())
+        .then(function () { if (App.profile) App.profile.name = v.slice(0, 24); }));
+    },
+
+    /* ---- sharing ---- */
     share: function () {
       var url = boardUrl();
       if (navigator.share) {
@@ -606,15 +561,14 @@
   };
 
   function boardUrl() {
-    return location.origin + location.pathname + "#/b/" + App.roomId;
+    return location.origin + location.pathname + "#/b/" + App.route.boardId;
   }
   function copy(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () { toast("Link copied"); },
+      navigator.clipboard.writeText(text).then(
+        function () { toast("Link copied"); },
         function () { window.prompt("Copy this link", text); });
-    } else {
-      window.prompt("Copy this link", text);
-    }
+    } else { window.prompt("Copy this link", text); }
   }
 
   root.addEventListener("click", function (ev) {
@@ -627,11 +581,15 @@
     if (ev.key !== "Enter") return;
     var t = ev.target;
     if (!t || t.tagName !== "INPUT") return;
-    if (t.id === "yourname") { ev.preventDefault(); actions.create(); }
-    else if (t.id === "joinname") { ev.preventDefault(); actions.join(); }
-    else if (t.closest(".sayrow")) {
-      var btn = t.closest(".sayrow").querySelector('[data-act="say"]');
-      if (btn) { ev.preventDefault(); actions.say(btn); }
+    var row = t.closest(".sayrow");
+    if (row) {
+      var btn = row.querySelector("[data-act]");
+      if (btn) { ev.preventDefault(); actions[btn.getAttribute("data-act")](btn); }
+      return;
+    }
+    if (t.id === "boardname") { ev.preventDefault(); actions.newboard(); }
+    else if (t.id === "email" || t.id === "password" || t.id === "yourname") {
+      ev.preventDefault(); actions.signin();
     }
   });
 
@@ -640,8 +598,6 @@
      ============================================================ */
 
   function render() {
-    // Keep whatever the person is typing across re-renders (realtime
-    // updates can land mid-sentence).
     var a = document.activeElement;
     var keep = a && a.tagName === "INPUT" && a.id
       ? { id: a.id, value: a.value, pos: a.selectionStart } : null;
@@ -661,40 +617,123 @@
   }
 
   function masthead(right) {
-    return '<header class="mast"><div class="mark"><span class="comet" aria-hidden="true"></span><h1>Iron Ledger</h1></div>'
-      + '<div class="when">' + (right || "") + "</div></header>" + modeBanner();
+    return '<header class="mast"><div class="mark"><span class="comet" aria-hidden="true"></span>'
+      + "<h1>Iron Ledger</h1></div>"
+      + '<div class="when">' + (right || "") + "</div></header>";
   }
 
   function view() {
-    if (App.loading) return masthead("") + '<div class="boot">Loading your board…</div>';
-
-    var h = "";
-
-    // ---------- no board yet: create one ----------
-    if (!App.roomId) {
-      var last = lsGet(NS + "lastRoom");
-      h += masthead("");
-      if (App.notice) h += '<div class="banner warn">' + esc(App.notice) + "</div>";
-      h += '<section class="panel">'
-        + '<h2 class="headline">Two people, one board, one tap a day.</h2>'
-        + '<p class="sub">You log a gym visit. Your friend sees it and says something. '
-        + 'That second part is the whole point — the app just makes it take three seconds.</p>'
-        + '<div class="field"><input id="yourname" type="text" maxlength="24" placeholder="Your name" autocomplete="given-name" autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">'
-        + '<button class="btn" data-act="create">Start a board</button></div>'
-        + '<div class="note">No account, no email. You get a link to send to one person.</div>'
-        + "</section>";
-      if (last) {
-        h += '<div class="banner">You already have a board on this device. '
-          + '<button class="linkish" data-act="reopen" data-id="' + esc(last) + '">Open it</button></div>';
-      }
-      return h;
+    if (!CONFIGURED) {
+      return masthead("") + '<div class="banner warn"><b>Not configured.</b> Add your Supabase '
+        + "API URL and publishable key to <code>config.js</code>, then reload.</div>";
     }
-
+    if (!App.booted) return masthead("") + '<div class="boot">Starting up…</div>';
+    if (!App.user) return authView();
+    if (App.loading && !App.d) return masthead("") + '<div class="boot">Loading…</div>';
     if (App.error) {
       return masthead("") + '<div class="banner warn">' + esc(App.error) + "</div>"
-        + '<div class="field"><button class="btn ghost" data-act="forget">Start a new board</button></div>';
+        + '<div class="field"><button class="btn ghost" data-act="boards">Back to your boards</button></div>';
     }
-    if (!App.data) return masthead("") + '<div class="boot">Loading…</div>';
+    return App.route.name === "board" ? boardView() : boardsView();
+  }
+
+  /* ---------- signed out ---------- */
+
+  function authView() {
+    var up = App.authMode === "up";
+    var h = masthead("");
+    h += '<section class="panel">'
+      + '<h2 class="headline">' + (up ? "Make an account" : "Welcome back") + "</h2>"
+      + '<p class="sub">One account covers every board you\'re on. Log the gym once and '
+      + "all of them update.</p>";
+    if (App.authMsg) h += '<div class="banner warn">' + esc(App.authMsg) + "</div>";
+    if (up) {
+      h += '<div class="field"><input id="yourname" type="text" maxlength="24" placeholder="Your name" '
+        + 'autocomplete="name" autocapitalize="words" autocorrect="off" spellcheck="false"></div>';
+    }
+    h += '<div class="field"><input id="email" type="email" placeholder="Email" '
+      + 'autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false" '
+      + 'inputmode="email" enterkeyhint="next"></div>'
+      + '<div class="field"><input id="password" type="password" placeholder="Password" '
+      + 'autocomplete="' + (up ? "new-password" : "current-password") + '" enterkeyhint="go"></div>'
+      + '<div class="field"><button class="btn" data-act="signin"' + (App.authBusy ? " disabled" : "") + '>'
+      + (App.authBusy ? "One moment…" : (up ? "Create account" : "Sign in")) + "</button></div>"
+      + '<div class="note">' + (up
+        ? 'Already have one? <button class="linkish" data-act="authmode" data-mode="in">Sign in</button>'
+        : 'New here? <button class="linkish" data-act="authmode" data-mode="up">Create an account</button>')
+      + "</div></section>";
+    return h;
+  }
+
+  /* ---------- your boards ---------- */
+
+  function boardsView() {
+    var h = masthead(esc(App.profile ? App.profile.name : ""));
+    var rosters = (App.d && App.d.rosters) || [];
+    var mine = (App.d && App.d.myCheckins) || [];
+    var wk = weekKeys(weekStart(new Date()));
+    var set = {}; mine.forEach(function (c) { set[String(c.day).slice(0, 10)] = 1; });
+    var thisWeek = wk.filter(function (k) { return set[k]; }).length;
+    var wentToday = !!set[today()];
+
+    h += '<section class="panel' + (wentToday ? " done" : "") + '">'
+      + '<div class="eyebrow">' + thisWeek + " session" + (thisWeek === 1 ? "" : "s") + " this week</div>"
+      + (wentToday
+          ? '<div class="doneline"><span class="tick" aria-hidden="true">✓</span>'
+            + '<h2 class="headline" style="margin-right:auto">You went today</h2>'
+            + '<button class="btn ghost tiny" data-act="undo">Undo</button></div>'
+            + '<div class="sub">Counted on every board you\'re on.</div>'
+          : '<button class="bigbtn" data-act="checkin">I went today</button>')
+      + "</section>";
+
+    h += '<section class="sect"><div class="sect-head"><h2>Your boards</h2></div>';
+    if (!App.myBoards.length) {
+      h += '<div class="empty">No boards yet. Make one below, or open an invite link '
+        + "someone sent you.</div>";
+    } else {
+      h += '<div class="boardlist">';
+      App.myBoards.forEach(function (r, i) {
+        var people = rosters.filter(function (x) { return x.board_id === r.board_id; });
+        var names = people.map(function (x) { return x.profiles ? x.profiles.name : "?"; });
+        h += '<button class="boardcard" data-act="openboard" data-id="' + r.board_id + '" '
+          + 'style="--pc:' + PC[i % PC.length] + '">'
+          + '<span class="bname">' + esc(r.boards.name) + "</span>"
+          + '<span class="bmeta">' + esc(names.join(" · ") || "just you")
+          + " · goal " + (r.goal || 4) + "×</span></button>";
+      });
+      h += "</div>";
+    }
+    h += "</section>";
+
+    h += '<section class="panel">'
+      + '<div class="eyebrow">Start another</div>'
+      + '<div class="field"><input id="boardname" type="text" maxlength="40" '
+      + 'placeholder="Board name — e.g. Sam &amp; me" autocapitalize="words" enterkeyhint="go">'
+      + '<button class="btn" data-act="newboard">Create</button></div>'
+      + '<div class="note">Different friends, different boards. Your attendance is shared '
+      + "across all of them; goals and chat are per board.</div></section>";
+
+    h += '<div class="footer"><span>Signed in as ' + esc(App.profile ? App.profile.name : "") + "</span>"
+      + '<button class="linkish" data-act="signout">Sign out</button></div>';
+    return h;
+  }
+
+  /* ---------- one board ---------- */
+
+  function boardView() {
+    var d = App.d;
+    if (!d) return masthead("") + '<div class="boot">Loading…</div>';
+
+    if (!d.isMember) {
+      return masthead("")
+        + '<section class="panel invite">'
+        + '<div class="eyebrow">You\'ve been invited</div>'
+        + '<h2 class="headline">' + esc(d.board.name) + "</h2>"
+        + '<p class="sub">Join and your gym history comes with you — including anything '
+        + "you've already logged on other boards.</p>"
+        + '<div class="field"><button class="btn" data-act="joinboard">Join this board</button>'
+        + '<button class="btn ghost" data-act="boards">Not now</button></div></section>';
+    }
 
     var wkS = weekStart(new Date());
     var wk = weekKeys(wkS);
@@ -702,126 +741,96 @@
     var range = fromKey(wk[0]).toLocaleDateString(undefined, { month: "short", day: "numeric" })
       + " – " + fromKey(wk[6]).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
-    h += masthead("week of " + esc(range));
+    var h = masthead("week of " + esc(range));
 
-    // ---------- who are you ----------
-    if (!App.meId) {
-      h += '<section class="panel">'
-        + '<div class="eyebrow">Welcome to the board</div>'
-        + '<h2 class="headline">Who are you?</h2>';
-      if (App.data.members.length) {
-        h += '<div class="chips">';
-        App.data.members.forEach(function (m) {
-          h += '<button class="chip" data-act="pick" data-id="' + m.id + '">'
-            + '<span class="dot" style="background:' + PC[m.color % PC.length] + '"></span>'
-            + esc(m.name) + "</button>";
-        });
-        h += "</div>"
-          + '<div class="note">Tap your own name. Do that once on each phone or '
-          + "computer you use \u2014 your history follows you.</div>";
-      }
-      var first = !App.data.members.length;
-      h += '<div class="field"><input id="joinname" type="text" maxlength="24" placeholder="'
-        + (first ? "Your name" : "add someone new") + '" autocomplete="given-name" '
-        + 'autocapitalize="words" autocorrect="off" spellcheck="false" enterkeyhint="go">'
-        + '<button class="btn' + (first ? "" : " ghost") + '" data-act="join">'
-        + (first ? "Join" : "Add") + "</button></div>"
-        + (first ? '<div class="note">No account, no password.</div>' : "")
-        + "</section>";
-      return h;
-    }
+    // board switcher
+    h += '<div class="switcher"><button class="linkish" data-act="boards">← all boards</button>'
+      + '<span class="bnow">' + esc(d.board.name) + "</span></div>";
 
-    var mine = me();
     var waiting = waitingOnMe();
-    var wentToday = App.data.checkins.some(function (c) {
-      return c.member_id === App.meId && String(c.day).slice(0, 10) === td;
+    var wentToday = (d.checkins || []).some(function (c) {
+      return c.user_id === uid() && String(c.day).slice(0, 10) === td;
     });
 
-    // ---------- 1. alone on the board: nothing else matters ----------
-    if (App.data.members.length < 2) {
+    if (d.members.length < 2) {
       h += '<section class="panel invite">'
         + '<div class="eyebrow">One thing left to do</div>'
         + '<h2 class="headline">This only works with someone else on it.</h2>'
-        + '<p class="sub">Send the link to the person you want to keep you honest. '
-        + "They tap it, type their name, and they're in — no account, no download.</p>"
+        + '<p class="sub">Send the link. They make an account, tap join, and they\'re on.</p>'
         + '<div class="field"><button class="btn" data-act="share">Send the link</button>'
         + '<button class="btn ghost" data-act="copy">Copy</button></div>'
-        + '<div class="linkbox"><code>' + esc(boardUrl()) + "</code></div>"
-        + "</section>";
+        + '<div class="linkbox"><code>' + esc(boardUrl()) + "</code></div></section>";
     }
 
-    // ---------- 2. someone is waiting on you ----------
     if (waiting.length) {
       var c0 = waiting[0];
-      var who = byId(App.data.members, c0.member_id);
+      var who = memberOf(c0.user_id);
       var d0 = String(c0.day).slice(0, 10);
-      var whenWord = d0 === td ? "went today" : d0 === dkey(new Date(Date.now() - 86400000))
-        ? "went yesterday" : "went " + fromKey(d0).toLocaleDateString(undefined, { weekday: "long" });
-      h += '<section class="panel ask" style="--pc:' + PC[who.color % PC.length] + '">'
+      var whenWord = d0 === td ? "went today"
+        : d0 === daysAgoKey(1) ? "went yesterday"
+        : "went " + fromKey(d0).toLocaleDateString(undefined, { weekday: "long" });
+      h += '<section class="panel ask" style="--pc:' + PC[(who ? who.color : 0) % PC.length] + '">'
         + '<div class="eyebrow">' + (waiting.length > 1 ? waiting.length + " waiting on you" : "Waiting on you") + "</div>"
-        + '<h2 class="headline">' + esc(who.name) + " " + whenWord + ". Say something.</h2>"
+        + '<h2 class="headline">' + esc(nameOf(c0.user_id)) + " " + whenWord + ". Say something.</h2>"
         + rxRow(c0.id)
-        + sayRow(c0.id, "Nice one, " + who.name.split(" ")[0] + "…", "ask")
+        + sayRow(c0.id, "Nice one, " + nameOf(c0.user_id).split(" ")[0] + "…", "ask", "comment")
         + "</section>";
     }
 
-    // ---------- 3. your own check-in ----------
-    var ms = stats(mine);
+    var ms = stats(d.me);
     if (wentToday) {
       h += '<section class="panel done' + (App.justChecked ? " celebrate" : "") + '">'
-        + '<div class="doneline">'
-        + '<span class="tick" aria-hidden="true">✓</span>'
+        + '<div class="doneline"><span class="tick" aria-hidden="true">✓</span>'
         + '<h2 class="headline" style="margin-right:auto">You went today</h2>'
         + '<button class="btn ghost tiny" data-act="undo">Undo</button></div>'
         + '<div class="sub">' + ms.thisWeek + " of " + ms.goal + " this week"
         + (ms.thisWeek >= ms.goal ? " — goal hit." : " — " + (ms.goal - ms.thisWeek) + " to go.")
+        + (App.myBoards.length === 2 ? " Counted on both your boards."
+           : App.myBoards.length > 2 ? " Counted on all " + App.myBoards.length + " of your boards." : "")
         + "</div></section>";
     } else {
       h += '<section class="panel">'
-        + '<div class="eyebrow">' + esc(mine.name) + " · " + ms.thisWeek + "/" + ms.goal + " this week"
+        + '<div class="eyebrow">' + esc(App.profile ? App.profile.name : "you") + " · "
+        + ms.thisWeek + "/" + ms.goal + " this week"
         + (ms.resting ? ' · <span class="resting">resting</span>' : "") + "</div>"
-        + '<button class="bigbtn" data-act="checkin">I went today</button>'
-        + "</section>";
+        + '<button class="bigbtn" data-act="checkin">I went today</button></section>';
     }
 
-    // ---------- 4. the pair ----------
-    if (App.data.members.length > 1) {
-      var ps = pairStats();
-      var names = App.data.members.map(function (m) { return m.name; });
+    if (d.members.length > 1) {
+      var gs = groupStats();
       h += '<section class="pair"><div class="top">'
-        + '<div class="score">' + ps.sum + " <small>of " + ps.goal + " sessions this week</small></div>"
-        + '<div class="note">' + esc(names.join(" + ")) + "</div></div>"
-        + '<div class="bar">' + App.data.members.map(function (m) {
+        + '<div class="score">' + gs.sum + " <small>of " + gs.goal + " sessions this week</small></div>"
+        + '<div class="note">' + esc(d.members.map(function (m) { return m.profiles.name; }).join(" + "))
+        + "</div></div>"
+        + '<div class="bar">' + d.members.map(function (m) {
             var s = stats(m);
-            return '<i style="width:' + (Math.min(s.thisWeek, s.goal) / ps.goal * 100) + "%;background:"
-              + PC[m.color % PC.length] + '"></i>';
+            return '<i style="width:' + (Math.min(s.thisWeek, s.goal) / gs.goal * 100)
+              + "%;background:" + PC[m.color % PC.length] + '"></i>';
           }).join("") + "</div>"
         + '<div class="pairfoot">'
-        + '<span class="note">' + (ps.together > 0
-            ? "<b>" + ps.together + "</b> week" + (ps.together === 1 ? "" : "s") + " you both hit it"
-            : "no week you both hit it \u2014 yet") + "</span>"
+        + '<span class="note">' + (gs.together > 0
+            ? "<b>" + gs.together + "</b> week" + (gs.together === 1 ? "" : "s") + " everyone hit it"
+            : "no week everyone hit it — yet") + "</span>"
         + '<span class="note">' + (waiting.length
             ? "<b>" + waiting.length + "</b> waiting on you"
-            : "Nothing waiting on you") + "</span>"
+            : "all quiet in the valley") + "</span>"
         + "</div></section>";
     }
 
-    // ---------- 5. people ----------
-    h += '<section class="sect"><div class="sect-head"><h2>The week so far</h2></div>';
-    h += '<div class="people">';
-    App.data.members.forEach(function (m) {
+    h += '<section class="sect"><div class="sect-head"><h2>The week so far</h2></div><div class="people">';
+    d.members.forEach(function (m) {
       var s = stats(m), col = PC[m.color % PC.length];
+      var isMe = m.user_id === uid();
       var pct = Math.min(100, Math.round(s.thisWeek / s.goal * 100));
-      h += '<article class="card' + (m.id === App.meId ? " me" : "") + '" style="--pc:' + col + '">'
+      h += '<article class="card' + (isMe ? " me" : "") + '" style="--pc:' + col + '">'
         + '<div class="who"><span class="dot" style="background:' + col + '"></span>'
-        + '<span class="nm">' + esc(m.name) + "</span>"
-        + (m.id === App.meId ? '<span class="youtag">you</span>' : "")
+        + '<span class="nm">' + esc(m.profiles.name) + "</span>"
+        + (isMe ? '<span class="youtag">you</span>' : "")
         + (s.resting ? '<span class="resting">rest week</span>' : "")
         + "</div>"
         + '<div class="ringrow"><div class="ring" style="--pct:' + pct + '" role="img" aria-label="'
         + s.thisWeek + " of " + s.goal + ' sessions this week"><i>' + s.thisWeek
-        + "<span>/" + s.goal + "</span></i></div>"
-        + '<div class="facts">'
+        + "<span>/" + s.goal + "</span></i></div><div class=\"facts\">"
         + '<div class="fact">' + (s.streak > 0
             ? '<b class="flame">' + s.streak + "</b> week" + (s.streak === 1 ? "" : "s")
               + " in a row " + (s.streak > 1 ? "🔥" : "")
@@ -831,36 +840,33 @@
             : s.since === 1 ? "went yesterday"
             : '<span class="' + (s.since >= 4 ? "stale" : "") + '">' + s.since + " days ago</span>")
         + "</div>"
-        + '<div class="fact note">' + s.total + " all time</div>"
-        + "</div></div>"
+        + '<div class="fact note">' + s.total + " all time</div></div></div>"
         + '<div class="cardfoot">';
-      if (m.id === App.meId) {
+      if (isMe) {
         h += '<span class="note">Goal</span>'
           + '<span class="step"><button data-act="goal" data-d="-1" aria-label="Lower weekly goal">−</button>'
           + "<span>" + s.goal + "×</span>"
           + '<button data-act="goal" data-d="1" aria-label="Raise weekly goal">+</button></span>'
           + '<button class="btn ghost tiny" data-act="rest">' + (s.resting ? "End rest week" : "Rest week") + "</button>"
-          + '<button class="btn ghost tiny" data-act="rename">Rename</button>'
           + '<button class="btn ghost tiny" data-act="nudges">Nudges ' + (m.nudges_on === false ? "off" : "on") + "</button>";
       } else {
         h += canNudge(m)
-          ? '<button class="btn ghost tiny" data-act="nudge" data-id="' + m.id + '">Nudge</button>'
+          ? '<button class="btn ghost tiny" data-act="nudge" data-id="' + m.user_id + '">Nudge</button>'
           : '<span class="note">' + (m.nudges_on === false ? "Nudges off" : "Nothing to nag about") + "</span>";
       }
       h += "</div></article>";
     });
     h += "</div></section>";
 
-    // ---------- 6. week grid ----------
     h += '<section class="sect"><div class="sect-head"><h2>This week</h2><span class="note">Mon – Sun</span></div>'
       + '<div class="gridwrap"><table class="week"><thead><tr><th class="rowname"></th>';
     wk.forEach(function (k, i) {
       h += "<th" + (k === td ? ' class="today"' : "") + ">" + DAYS[i] + "<br>" + fromKey(k).getDate() + "</th>";
     });
     h += "<th></th></tr></thead><tbody>";
-    App.data.members.forEach(function (m) {
-      var col = PC[m.color % PC.length], days = daysOf(m.id), s = stats(m);
-      h += '<tr><th class="rowname" style="color:' + col + '">' + esc(m.name) + "</th>";
+    d.members.forEach(function (m) {
+      var col = PC[m.color % PC.length], days = daysOf(m.user_id), s = stats(m);
+      h += '<tr><th class="rowname" style="color:' + col + '">' + esc(m.profiles.name) + "</th>";
       wk.forEach(function (k) {
         var on = !!days[k], fut = k > td;
         h += "<td" + (k === td ? ' class="col-today"' : "") + '><div class="mk '
@@ -870,13 +876,12 @@
     });
     h += "</tbody></table></div></section>";
 
-    // ---------- 7. the thread ----------
     h += '<section class="sect"><div class="sect-head"><h2>The thread</h2></div>' + thread(waiting) + "</section>";
 
-    // ---------- footer ----------
     h += '<div class="footer">'
       + '<button class="linkish" data-act="copy">Copy board link</button>'
-      + '<button class="linkish" data-act="notme">Not ' + esc(mine.name) + "?</button>"
+      + '<button class="linkish" data-act="rename">Change your name</button>'
+      + '<button class="linkish" data-act="leaveboard">Leave board</button>'
       + "</div>";
     return h;
   }
@@ -887,38 +892,43 @@
     if (s.resting) return false;
     if (s.since !== null && s.since < 2) return false;
     var cutoff = Date.now() - NUDGE_COOLDOWN_H * 3600000;
-    return !App.data.events.some(function (e) {
-      return e.kind === "nudge" && e.member_id === App.meId && e.target_id === m.id
+    return !(App.d.events || []).some(function (e) {
+      return e.kind === "nudge" && e.user_id === uid() && e.target_user_id === m.user_id
         && new Date(e.created_at).getTime() > cutoff;
     });
   }
 
-  function rxRow(checkinId) {
-    var rs = repliesFor(checkinId);
+  function rxRow(cid) {
+    var rs = reactionsFor(cid);
     var h = '<div class="rx">';
     RX.forEach(function (em) {
       var list = rs.filter(function (r) { return r.emoji === em; });
-      var mineR = list.some(function (r) { return r.member_id === App.meId; });
-      h += '<button data-act="react" data-id="' + checkinId + '" data-em="' + em + '"'
+      var mineR = list.some(function (r) { return r.user_id === uid(); });
+      h += '<button data-act="react" data-id="' + cid + '" data-em="' + em + '"'
         + (mineR ? ' class="mine"' : "") + ' aria-label="React ' + em + '">' + em
         + (list.length ? '<span class="n">' + list.length + "</span>" : "") + "</button>";
     });
+    h += '<button class="cbtn" data-act="opencomment" data-id="' + cid + '" '
+      + 'aria-label="Write a comment">💬 <span class="n">comment</span></button>';
     return h + "</div>";
   }
-  function sayRow(checkinId, placeholder, prefix) {
-    var inputId = (prefix || "say") + "-" + checkinId;
-    return '<div class="sayrow"><input id="' + inputId + '" type="text" maxlength="140" '
-      + 'placeholder="' + esc(placeholder) + '" autocomplete="off" '
-      + 'autocapitalize="sentences" enterkeyhint="send">'
-      + '<button class="btn" data-act="say" data-id="' + checkinId + '" '
+  function sayRow(cid, placeholder, prefix, actName) {
+    var inputId = (prefix || "c") + "-" + cid;
+    return '<div class="sayrow"><input id="' + inputId + '" type="text" maxlength="280" '
+      + 'placeholder="' + esc(placeholder) + '" autocomplete="off" autocapitalize="sentences" '
+      + 'enterkeyhint="send">'
+      + '<button class="btn" data-act="' + (actName || "comment") + '" data-id="' + cid + '" '
       + 'data-input="' + inputId + '">Send</button></div>';
   }
-  function textReplies(checkinId) {
-    var rs = repliesFor(checkinId).filter(function (r) { return r.body; });
-    if (!rs.length) return "";
-    return '<div class="replies">' + rs.map(function (r) {
-      var m = byId(App.data.members, r.member_id);
-      return '<div class="reply"><b>' + esc(m ? m.name : "someone") + "</b> " + esc(r.body) + "</div>";
+  function commentList(cid) {
+    var cs = commentsFor(cid);
+    if (!cs.length) return "";
+    return '<div class="replies">' + cs.map(function (c) {
+      return '<div class="reply"><b>' + esc(nameOf(c.user_id)) + "</b> " + esc(c.body)
+        + (c.user_id === uid()
+            ? ' <button class="linkish tinyx" data-act="delcomment" data-id="' + c.id + '">delete</button>'
+            : "")
+        + "</div>";
     }).join("") + "</div>";
   }
 
@@ -927,97 +937,116 @@
     waiting.forEach(function (c) { waitingIds[c.id] = 1; });
 
     var items = [];
-    App.data.checkins.forEach(function (c) {
+    (App.d.checkins || []).forEach(function (c) {
       items.push({ ts: new Date(c.created_at || String(c.day).slice(0, 10)).getTime(), kind: "c", c: c });
     });
-    App.data.events.forEach(function (e) {
+    (App.d.events || []).forEach(function (e) {
       items.push({ ts: new Date(e.created_at).getTime(), kind: "e", e: e });
     });
     items.sort(function (a, b) { return b.ts - a.ts; });
     items = items.slice(0, 12);
 
-    if (!items.length) {
-      return '<div class="empty">Nothing here yet. The first check-in sets the pace.</div>';
-    }
+    if (!items.length) return '<div class="empty">Nothing here yet. Someone has to go first.</div>';
 
     return '<div class="thread">' + items.map(function (it) {
       if (it.kind === "c") {
-        var c = it.c, m = byId(App.data.members, c.member_id);
+        var c = it.c, m = memberOf(c.user_id);
         if (!m) return "";
         var col = PC[m.color % PC.length];
-        var d = String(c.day).slice(0, 10);
+        var day = String(c.day).slice(0, 10);
         return '<div class="item' + (waitingIds[c.id] ? " unanswered" : "") + '" style="--pc:' + col + '">'
-          + '<div class="av">' + esc(initials(m.name)) + "</div><div class=\"body\">"
-          + '<div class="line"><b>' + esc(m.name) + "</b> went to the gym</div>"
+          + '<div class="av">' + esc(initials(m.profiles.name)) + '</div><div class="body">'
+          + '<div class="line"><b>' + esc(m.profiles.name) + "</b> "
+          + (c.user_id === uid() ? "went to the gym" : "went to the gym") + "</div>"
           + '<div class="meta">'
-          + esc(fromKey(d).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }))
+          + esc(fromKey(day).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric" }))
           + (c.created_at ? " · " + ago(c.created_at) : "") + "</div>"
-          + textReplies(c.id)
+          + commentList(c.id)
           + rxRow(c.id)
-          + (m.id !== App.meId && waitingIds[c.id] ? sayRow(c.id, "Say something…") : "")
+          + (App.openComment === c.id || waitingIds[c.id]
+              ? sayRow(c.id, "Say something…", "c", "comment") : "")
           + "</div></div>";
       }
-      var e = it.e, from = byId(App.data.members, e.member_id);
-      if (!from) return "";
+      var e = it.e;
       if (e.kind === "nudge") {
-        var to = byId(App.data.members, e.target_id);
         return '<div class="item sys"><div class="av" style="background:var(--accent);color:var(--accent-ink)">→</div>'
-          + '<div class="body"><div class="line"><b>' + esc(from.name) + "</b> to <b>"
-          + esc(to ? to.name : "someone") + "</b> — " + esc(e.body || "your move") + "</div>"
+          + '<div class="body"><div class="line"><b>' + esc(nameOf(e.user_id)) + "</b> to <b>"
+          + esc(nameOf(e.target_user_id)) + "</b> — " + esc(e.body || "your move") + "</div>"
           + '<div class="meta">' + ago(e.created_at) + "</div></div></div>";
       }
       return '<div class="item sys"><div class="av" style="background:var(--muted)">'
-        + esc(initials(from.name)) + "</div><div class=\"body\">"
-        + '<div class="line"><b>' + esc(from.name) + "</b> joined the board</div>"
+        + esc(initials(nameOf(e.user_id))) + '</div><div class="body">'
+        + '<div class="line"><b>' + esc(nameOf(e.user_id)) + "</b> joined the board</div>"
         + '<div class="meta">' + ago(e.created_at) + "</div></div></div>";
     }).join("") + "</div>";
-  }
-
-  function modeBanner() {
-    if (store.online) return "";
-    return '<div class="banner warn"><b>Demo mode.</b> Nothing is synced — this board lives in this '
-      + "browser only, and your friend will see an empty one. Add your two Supabase values to "
-      + "<code>config.js</code> to turn sync on.</div>";
   }
 
   /* ============================================================
      Boot
      ============================================================ */
 
-  window.addEventListener("hashchange", function () {
-    var r = routeRoom();
-    if (r === App.roomId) return;
-    App.roomId = r;
-    App.meId = r ? lsGet(NS + "me." + r) : null;
-    App.data = null;
-    App.loading = !!r;
-    render();
-    watch();
-    load();
-  });
-
-  // Installed from the home screen, the app opens at start_url with no
-  // hash. Send it straight back to the board this device already knows.
-  if (!routeRoom()) {
-    var lastRoom = lsGet(NS + "lastRoom");
-    if (lastRoom && lsGet(NS + "me." + lastRoom)) {
-      location.replace(location.pathname + location.search + "#/b/" + lastRoom);
-    }
+  function ensureProfile() {
+    return sb.from("profiles").select("*").eq("id", uid()).maybeSingle().then(unwrap)
+      .then(function (p) {
+        if (p) { App.profile = p; return p; }
+        var nm = (App.user.user_metadata && App.user.user_metadata.name)
+          || (App.user.email || "you").split("@")[0];
+        return sb.from("profiles").insert({ id: uid(), name: nm }).select().single().then(unwrap)
+          .then(function (np) { App.profile = np; return np; });
+      });
   }
 
-  App.roomId = routeRoom();
-  App.meId = App.roomId ? lsGet(NS + "me." + App.roomId) : null;
-  App.loading = !!App.roomId;
-  render();
-  watch();
-  load();
+  function onSignedIn() {
+    return ensureProfile().then(function () {
+      watch();
+      return load();
+    }).catch(function (e) {
+      App.error = (e && e.message) || "Couldn't load your account.";
+      App.loading = false;
+      render();
+    });
+  }
 
-  // Day can roll over while the app sits open on a phone.
+  window.addEventListener("hashchange", function () {
+    var r = parseRoute();
+    if (r.name === App.route.name && r.boardId === App.route.boardId) return;
+    App.route = r;
+    App.d = null;
+    App.error = null;
+    App.openComment = null;
+    render();
+    watch();
+    if (App.user) load();
+  });
+
+  App.route = parseRoute();
+
+  if (!CONFIGURED) {
+    App.booted = true;
+    render();
+  } else {
+    render();
+    sb.auth.getSession().then(function (res) {
+      App.booted = true;
+      App.user = (res.data && res.data.session && res.data.session.user) || null;
+      if (App.user) onSignedIn(); else { App.loading = false; render(); }
+    });
+
+    sb.auth.onAuthStateChange(function (event, session) {
+      var next = session ? session.user : null;
+      var was = App.user ? App.user.id : null;
+      App.user = next;
+      App.booted = true;
+      if (next && next.id !== was) { App.authBusy = false; App.authMsg = null; onSignedIn(); }
+      else if (!next) { App.d = null; App.loading = false; watch(); render(); }
+    });
+  }
+
   var bootDay = today();
   setInterval(function () {
     if (today() !== bootDay) { bootDay = today(); render(); }
   }, 60000);
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden && App.roomId) load();
+    if (!document.hidden && App.user) load();
   });
 })();

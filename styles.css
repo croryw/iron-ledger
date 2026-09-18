@@ -423,3 +423,37 @@ table.week td{padding:5px 3px}
   .panel{padding:16px}
   .people{gap:12px}
 }
+
+/* ------------------------------------------------------------
+   v2 — accounts, multiple boards, comments
+   ------------------------------------------------------------ */
+
+/* board switcher strip under the masthead */
+.switcher{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:-6px}
+.switcher .bnow{font-family:Fraunces,Georgia,serif;font-variation-settings:"SOFT" 100,"WONK" 1;
+  font-weight:700;font-size:18px;color:var(--ink)}
+
+/* the list of boards you're on */
+.boardlist{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:13px}
+.boardcard{position:relative;text-align:left;cursor:pointer;
+  background:color-mix(in srgb,var(--pc) 10%,var(--surface));
+  border:2.5px solid var(--line);border-radius:var(--blob);box-shadow:var(--shadow);
+  padding:16px 17px 16px 21px;display:flex;flex-direction:column;gap:5px;
+  transition:transform .09s ease,box-shadow .09s ease,border-color .14s ease}
+.boardcard::before{content:"";position:absolute;inset:8px auto 8px 0;width:6px;border-radius:99px;
+  background:var(--pc)}
+.boardcard:hover{border-color:var(--pc)}
+.boardcard:active{transform:translateY(3px);box-shadow:0 1px 0 var(--line)}
+.boardcard .bname{font-family:Fraunces,Georgia,serif;font-variation-settings:"SOFT" 100,"WONK" 1;
+  font-weight:700;font-size:20px;line-height:1.15}
+.boardcard .bmeta{font-size:13px;color:var(--ink2)}
+
+/* the comment affordance sits in the reaction row */
+.rx .cbtn{border-style:dashed}
+.rx .cbtn .n{font-weight:700;color:var(--muted);text-transform:none}
+.reply .tinyx{font-size:11.5px;margin-left:6px;opacity:.7}
+.reply .tinyx:hover{opacity:1}
+
+button:disabled{opacity:.55;cursor:default}
+button:disabled:active{transform:none}
+input[type="password"],input[type="email"]{letter-spacing:normal}

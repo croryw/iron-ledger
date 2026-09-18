@@ -1,7 +1,11 @@
 # Iron Ledger — setup
 
-A shared gym check-in board for two or three people. Installs to the iPhone
-home screen like a real app, syncs live between phones, costs nothing to run.
+A shared gym check-in board. Installs to the iPhone home screen like a real
+app, syncs live between phones, costs nothing to run.
+
+You can be on several boards at once — different friends, different groups.
+**A check-in belongs to you, not to a board:** log the gym once and every board
+you're on updates. Goals, comments and nudges stay per board.
 
 No terminal needed. Two free accounts, about 15 minutes.
 
@@ -30,6 +34,9 @@ roughly 20,000 check-ins a day to trouble either one.
 4. In the left sidebar open **SQL Editor** → **New query**. Open
    `supabase-setup.sql` from this folder, paste the whole thing in, and press
    **Run**. It should say *Success*.
+
+   ⚠️ That script drops any older Iron Ledger tables first. Running it on a
+   project that already has data will delete that data.
 5. Go to **Project Settings** (the gear) → **API Keys**. Copy two things:
    - The **API URL** — under **Data API** (older projects call it *Project URL*);
      looks like `https://abcdefgh.supabase.co`
@@ -40,6 +47,17 @@ roughly 20,000 check-ins a day to trouble either one.
    the *Legacy API keys* tab — both work identically. Never use the
    **secret** key (or legacy `service_role`): it bypasses every security
    rule and must not go in a web page.
+
+### Turn off email confirmation
+
+Still in Supabase: **Authentication** → **Sign In / Providers** → **Email**, and
+switch **Confirm email** OFF, then save.
+
+Leave it on and every new account has to click a link in an email — and
+Supabase's built-in mail service is rate-limited to a couple of messages an
+hour, so in practice the email won't arrive and nobody can get in. (If you'd
+rather keep confirmation on, connect your own SMTP under Project Settings →
+Auth → SMTP first.)
 
 ## Step 2 — Paste those two values in
 
@@ -78,13 +96,21 @@ That URL is your app. It's served over HTTPS, which the service worker and
 
 1. Open the URL in **Safari** on your iPhone (it has to be Safari — Chrome on
    iOS can't install web apps).
-2. **Share** → **Add to Home Screen**. You'll get the barbell icon and it opens
+2. **Share** → **Add to Home Screen**. You'll get the comet icon and it opens
    without browser chrome.
-3. Open it, type your name, **Start a board**.
-4. Hit **Send the link** and send it to your friend. They open it, type their
-   name, and they're on. Tell them to add it to their home screen too.
+3. Open it, **Create an account** (name, email, password), then **Create** a
+   board and give it a name.
+4. Hit **Send the link**. Your friend opens it, makes their own account, and
+   taps **Join this board**. Tell them to add it to their home screen too.
 
-That link is the board. Anyone who has it is on it, so don't post it publicly.
+Everyone signs in, so the app knows who you are on any device — open the same
+account on your phone and your laptop and it's the same you.
+
+### More than one board
+
+Tap **← all boards** at the top to see everything you're on, switch between
+them, or start another. When you log a session it counts on all of them at
+once. Each board keeps its own weekly goal and its own conversation.
 
 ---
 
@@ -98,7 +124,7 @@ changing `app.js`, `styles.css` or `index.html` you must also bump the version
 in `sw.js`:
 
 ```js
-const CACHE = 'iron-ledger-v2';   // was v1
+const CACHE = 'iron-ledger-v7';   // was v6
 ```
 
 Otherwise phones keep serving the old copy.
@@ -107,22 +133,24 @@ Otherwise phones keep serving the old copy.
 
 ## What this setup does and doesn't protect
 
-There's no login, by design — asking your friend to make an account is the
-fastest way to never get them on the board. Security is the secret link: whoever
-holds it can read and write that board.
+Everyone signs in, and the database enforces the rules rather than trusting the
+app. Specifically:
 
-Practically, for two people logging gym visits, that's fine. Be aware that:
+- You can only read a board you are a member of.
+- You can only see someone's attendance if you share a board with them.
+- You can only write check-ins, comments and reactions as yourself.
+- You can only add or remove *yourself* from a board.
 
-- The Supabase publishable key sits in `config.js`, which is public. That's
-  what it's for, but it means someone who found your site could in principle read the
-  boards in your project. Don't put anything private in here.
-- Anyone you send the link to keeps access until you delete the board.
+These are Postgres row-level security policies, so they hold even if somebody
+opens the browser console and calls the database directly.
 
-**If you ever want it properly locked down**, the upgrade is Supabase
-*anonymous sign-in* plus row-level policies keyed to a `room_members` table, so
-the database enforces membership rather than trusting the link. It's maybe an
-hour of work and doesn't change the user experience at all — nobody types a
-password either way.
+The remaining soft spot is the invite: anyone holding a board link can join that
+board. Board links are random UUIDs and can't be guessed, but treat one like a
+door key — don't post it publicly. If a link gets out, the fix is to leave that
+board and make a new one.
+
+The publishable key in `config.js` is public by design and grants nothing on its
+own; every request is still checked against the policies above.
 
 ---
 
@@ -148,10 +176,16 @@ works without an App Store listing.
 **Page is blank** — open the URL on a desktop browser, press F12, and look at
 the Console tab. Nine times out of ten it's a typo in `config.js`.
 
-**Banner says "Demo mode"** — `config.js` is empty or the values are wrong.
+**Banner says "Not configured"** — `config.js` is empty or the values are wrong.
 
-**Your friend sees an empty board** — they opened the bare site URL instead of
-your board link. Send them the full link including the `#/b/…` part.
+**"Check your email for the confirmation link"** — email confirmation is still
+switched on in Supabase. Turn it off (Step 1) and create the account again.
+
+**Your friend sees "Your boards" and no board** — they opened the bare site URL
+instead of your board link. Send them the full link including the `#/b/…` part.
+
+**"new row violates row-level security policy"** — the SQL in
+`supabase-setup.sql` didn't finish. Re-run the whole file.
 
 **Changes aren't showing up** — bump `CACHE` in `sw.js` (see above), then on the
 phone delete the home screen icon and re-add it.
@@ -173,4 +207,4 @@ resume it. Daily use keeps it awake.
 | `sw.js` | Service worker: offline support and caching. |
 | `manifest.webmanifest` | Makes it installable. Name, icon, colours. |
 | `icons/` | App icons for the home screen. |
-| `supabase-setup.sql` | Database tables and rules. Run once. |
+| `supabase-setup.sql` | Database tables and security rules. Run once. |
